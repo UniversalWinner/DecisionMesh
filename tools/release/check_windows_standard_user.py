@@ -47,7 +47,7 @@ def digest(path: Path) -> str:
 def safe_path(path: Path, *, missing: bool = False) -> Path:
     require(path.is_absolute() and not str(path).startswith(("\\\\", "//")), "local_path_required")
     require(".." not in path.parts, "noncanonical_path")
-    for part in (path, *path.parents):
+    for part in (*reversed(path.parents), path):
         try:
             info = part.lstat()
         except FileNotFoundError:
@@ -55,6 +55,7 @@ def safe_path(path: Path, *, missing: bool = False) -> Path:
             continue
         require(not stat.S_ISLNK(info.st_mode) and
                 not getattr(info, "st_file_attributes", 0) & 1024, "reparse_path")
+        require(part == path or stat.S_ISDIR(info.st_mode), "missing_ancestor")
     return path
 
 
@@ -95,14 +96,182 @@ def validate_token(token: dict, expected_sid: str, *, parent: bool = False) -> N
                 and token.get("integrity") == "S-1-16-8192", "standard_token_required")
 
 
-def load_exact(path: Path, name: str) -> Any:
+def load_exact(path: Path, name: str, *, expected_sha256: str | None = None) -> Any:
     regular(path)
+    with path.open("rb") as stream:
+        source = stream.read(1024 * 1024 + 1)
+    require(len(source) <= 1024 * 1024, "helper_bounds")
+    require(expected_sha256 is None or hashlib.sha256(source).hexdigest() == expected_sha256,
+            "installed_guard_changed")
     spec = importlib.util.spec_from_file_location(name, path)
     require(spec is not None and spec.loader is not None, "helper_unavailable")
     module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    previous = sys.modules.get(name)
+    sys.modules[name] = module  # Dataclasses need the exact module during definition.
+    try:
+        # Execute these bounded, hash-verified source bytes rather than cached bytecode.
+        exec(compile(source, str(path), "exec"), module.__dict__)  # noqa: S102
+    finally:
+        if previous is None:
+            sys.modules.pop(name, None)
+        else:
+            sys.modules[name] = previous
     return module
 
+
+DATA_MAX_ENTRIES = 256
+DATA_MAX_FILE_BYTES = 2 * 1024 * 1024
+DATA_MAX_TOTAL_BYTES = 8 * 1024 * 1024
+DATA_MAX_DEPTH = 12
+DATA_FAILURES = frozenset({
+    "child_data_context_changed", "child_data_identity_changed", "child_data_unsafe_entry",
+    "child_data_bounds", "child_data_owner_unproven", "child_data_inventory_changed",
+    "child_data_guard_unavailable", "child_data_cleanup_failed",
+})
+
+
+def child_data_failure(error: BaseException) -> dict:
+    code = vars(error).get("code") if type(error) is QualificationError else None
+    return {"status": "FAILED", "code": code if type(code) is str and code in DATA_FAILURES
+            else "child_data_cleanup_failed"}
+
+
+def child_entry(path: Path, held: dict, *, capture: bool = False) -> os.stat_result:
+    """Top-down, non-following observations; this is not atomic handle-relative traversal."""
+    require(path.is_absolute() and not str(path).startswith(("\\\\", "//"))
+            and ".." not in path.parts, "child_data_unsafe_entry")
+    for part in (*reversed(path.parents), path):
+        info = part.lstat()
+        require(not stat.S_ISLNK(info.st_mode) and
+                not getattr(info, "st_file_attributes", 0) & 1024,
+                "child_data_unsafe_entry")
+        require(stat.S_ISDIR(info.st_mode) if part != path else
+                stat.S_ISDIR(info.st_mode) or stat.S_ISREG(info.st_mode),
+                "child_data_unsafe_entry")
+        identity = (info.st_dev, info.st_ino, stat.S_IFMT(info.st_mode))
+        require((part in held and held[part] == identity) or
+                (capture and part not in held), "child_data_identity_changed")
+        held[part] = identity
+    return info
+
+
+def child_owned_entry(path: Path, data: Path, held: dict, owner_check: Any,
+                      *, capture: bool) -> os.stat_result:
+    require(path.is_relative_to(data), "child_data_unsafe_entry")
+    for part in (*reversed(path.parents), path):
+        if not part.is_relative_to(data):
+            continue
+        info = child_entry(part, held, capture=capture)
+        try:
+            owner_check(part)
+        except BaseException:  # noqa: BLE001 - all uncertainty is a fixed failure, never permission
+            raise QualificationError("child_data_owner_unproven") from None
+        require(child_entry(part, held).st_mode == info.st_mode, "child_data_identity_changed")
+    return info
+
+
+def child_data_record(path: Path, data: Path, held: dict, owner_check: Any,
+                      *, capture: bool) -> dict:
+    info = child_owned_entry(path, data, held, owner_check, capture=capture)
+    row = {"identity": held[path], "mode": info.st_mode, "links": info.st_nlink,
+           "kind": "directory" if stat.S_ISDIR(info.st_mode) else "file"}
+    if row["kind"] == "file":
+        require(info.st_nlink == 1, "child_data_unsafe_entry")
+        require(info.st_size <= DATA_MAX_FILE_BYTES, "child_data_bounds")
+        with path.open("rb") as stream:
+            opened = os.fstat(stream.fileno())
+            require((opened.st_dev, opened.st_ino, opened.st_mode, opened.st_nlink, opened.st_size)
+                    == (info.st_dev, info.st_ino, info.st_mode, 1, info.st_size),
+                    "child_data_identity_changed")
+            body = stream.read(DATA_MAX_FILE_BYTES + 1)
+        require(len(body) == info.st_size, "child_data_inventory_changed")
+        after = child_owned_entry(path, data, held, owner_check, capture=False)
+        require((after.st_mode, after.st_nlink, after.st_size)
+                == (info.st_mode, 1, len(body)), "child_data_inventory_changed")
+        row.update(bytes=len(body), sha256=hashlib.sha256(body).hexdigest())
+    return row
+
+
+def child_data_inventory(data: Path, held: dict, owner_check: Any, *, capture: bool) -> dict:
+    """Inventory only the held synthetic data root, with strict entry/depth/byte limits."""
+    result, pending, total = {}, [data], 0
+    while pending:
+        path = pending.pop()
+        relative = path.relative_to(data)
+        require(len(relative.parts) <= DATA_MAX_DEPTH and len(result) < DATA_MAX_ENTRIES,
+                "child_data_bounds")
+        row = child_data_record(path, data, held, owner_check, capture=capture)
+        result[relative.as_posix()] = row
+        total += row.get("bytes", 0)
+        require(total <= DATA_MAX_TOTAL_BYTES, "child_data_bounds")
+        if row["kind"] == "directory":
+            # Do not gather an unbounded list, or follow any discovered entry here.
+            child_entry(path, held)
+            with os.scandir(path) as entries:
+                for entry in entries:
+                    require(len(result) + len(pending) < DATA_MAX_ENTRIES, "child_data_bounds")
+                    pending.append(path / entry.name)
+    return result
+
+
+def remove_child_data(data: Path, held: dict, expected: dict, owner_check: Any,
+                      check_context: Any) -> dict:
+    check_context()
+    require(child_data_inventory(data, held, owner_check, capture=False) == expected,
+            "child_data_inventory_changed")  # Entire preflight before the first deletion.
+    files = sorted(n for n, row in expected.items() if row["kind"] == "file")
+    directories = sorted((n for n, row in expected.items() if row["kind"] == "directory"),
+                         key=lambda n: len(Path(n).parts), reverse=True)
+    for name in files + directories:
+        check_context()
+        path = data / name
+        require(child_data_record(path, data, held, owner_check, capture=False) == expected[name],
+                "child_data_inventory_changed")
+        if expected[name]["kind"] == "file":
+            path.unlink()
+        else:
+            path.rmdir()  # New entries fail closed; never recurse as a fallback.
+    check_context()
+    try:
+        data.lstat()
+    except FileNotFoundError:
+        return {"status": "PASS", "files_removed": len(files),
+                "directories_removed": len(directories)}
+    raise QualificationError("child_data_cleanup_failed")
+
+
+def validate_child_report(value: object, sid: str) -> None:
+    allowed = {"status", "sid", "token", "profile", "wheel_sha256", "smoke", "runtime_exited",
+               "lifetime_lock_released", "installed_package_bytes_equal", "python_version",
+               "platform", "limits", "child_fixture_cleanup"}
+    require(type(value) is dict and set(value) <= allowed and value.get("sid") == sid,
+            "child_result_invalid")
+    require(value.get("status") in {"PASS", "FAILED_CHILD_FIXTURE_CLEANUP"}
+            and all(value.get(k) is True for k in ("runtime_exited", "lifetime_lock_released",
+                                                 "installed_package_bytes_equal")),
+            "child_result_invalid")
+    smoke, cleanup = value.get("smoke"), value.get("child_fixture_cleanup")
+    smoke_fields = {"installed", "dependency_check", "doctor_readonly", "producer_spool_smoke",
+                    "installed_runtime_local_verification_twice", "installed_runtime_stopped",
+                    "launch_environment", "same_version_reinstall_preserved_data",
+                    "uninstall_preserved_data_and_removed_package", "dependencies_before_uninstall",
+                    "limits"}
+    require(type(smoke) is dict and set(smoke) <= smoke_fields
+            and all(smoke.get(k) is True for k in (
+        "installed_runtime_stopped", "same_version_reinstall_preserved_data",
+        "uninstall_preserved_data_and_removed_package")), "child_result_invalid")
+    require(type(cleanup) is dict, "child_result_invalid")
+    if cleanup.get("status") == "PASS":
+        require(set(cleanup) == {"status", "files_removed", "directories_removed"}
+                and type(cleanup["files_removed"]) is int
+                and type(cleanup["directories_removed"]) is int
+                and 0 <= cleanup["files_removed"] <= DATA_MAX_ENTRIES
+                and 1 <= cleanup["directories_removed"] <= DATA_MAX_ENTRIES
+                and value["status"] == "PASS", "child_result_invalid")
+    else:
+        require(cleanup.get("status") == "FAILED" and set(cleanup) == {"status", "code"}
+                and type(cleanup["code"]) is str and cleanup["code"] in DATA_FAILURES
+                and value["status"] == "FAILED_CHILD_FIXTURE_CLEANUP", "child_result_invalid")
 
 
 def offline_wheel(path: Path) -> None:
@@ -272,17 +441,20 @@ def execute(fixture: Path, inputs: dict, api: Any, env: dict[str, str],
         phase = "child_execution"
         api.resume(process.thread)
         require(api.wait(process.process, 600_000), "child_timeout")
-        require(api.exit_code(process.process) == 0, "child_failed")
+        child_exit = api.exit_code(process.process)
         require(api.job_empty(job), "owned_descendants_remain")
         outcome = fixture / "out/result.json"
         regular(outcome)
         require(outcome.stat().st_size < 128 * 1024, "result_bounds")
-        observed = json.loads(outcome.read_text(encoding="utf-8"))
-        require(observed.get("status") == "PASS" and observed.get("sid") == account["sid"]
-                and observed.get("runtime_exited") is True
-                and observed.get("lifetime_lock_released") is True, "child_result_invalid")
-        staged["out/result.json"] = digest(outcome)
-        result.update(status="PASS", child=observed, parent=parent)
+        with outcome.open("rb") as stream:
+            body = stream.read(128 * 1024)
+        require(len(body) < 128 * 1024, "result_bounds")
+        observed = json.loads(body)
+        validate_child_report(observed, account["sid"])
+        staged["out/result.json"] = hashlib.sha256(body).hexdigest()
+        result.update(child=observed, parent=parent)  # Preserve proof even when exit/status fail.
+        require(child_exit == 0 and observed["status"] == "PASS", "child_failed")
+        result["status"] = "PASS"
     except BaseException as error:  # noqa: BLE001 - project only bounded diagnostics
         result["status"] = "FAILED_OR_UNSUPPORTED"
         result["failed_phase"] = phase
@@ -384,17 +556,53 @@ def child_smoke(fixture: Path, api: Any, env: dict[str, str]) -> dict:
     inspected = checker.inspect_archive(wheel)
     work = profile / "AppData/Local" / fixture.name
     require(not work.exists(), "fresh_user_work_required")
+    data, held = work / "user-data", {}
+    child_entry(profile, held, capture=True)
     real_run, runtime = subprocess.run, None
+    prepared, preparation_failure, owner_check = None, None, None
+    uninstall_seen = False
+    def context() -> None:
+        validate_token(api.token(), config["sid"])
+        require(api.profile_path(config["sid"]) == profile and api.loaded_profile(config["sid"])
+                and Path(env["USERPROFILE"]) == profile
+                and Path(env["LOCALAPPDATA"]) == profile / "AppData/Local"
+                and work == profile / "AppData/Local" / fixture.name,
+                "child_data_context_changed")
+        child_entry(work, held)
     proof = {"runtime_exited": False, "lifetime_lock_released": False,
              "installed_package_bytes_equal": False}
     def observed_run(args: list, **kwargs: Any) -> Any:
-        nonlocal runtime
+        nonlocal runtime, prepared, preparation_failure, owner_check, uninstall_seen
         command = [str(x) for x in args]
         child_env = kwargs.get("env", {})
         require(child_env.get("PIP_NO_INDEX") == "1"
                 and child_env.get("PIP_FIND_LINKS") == str(fixture / "input/wheels"),
                 "offline_environment_required")
+        child_entry(work, held, capture=work not in held)
+        enrolling = command[1:3] == ["producer", "enroll"]
+        if enrolling:
+            safe_path(data, missing=True)
+            require(not data.exists(), "child_data_context_changed")
+        uninstalling = command[1:] == ["-m", "pip", "uninstall", "--yes", "decision-mesh"]
+        if uninstalling:
+            require(not uninstall_seen and all(proof.values()), "runtime_proof_missing")
+            uninstall_seen = True
+            try:
+                context()
+                require(data in held, "child_data_identity_changed")
+                guard = work / "environment/Lib/site-packages/decision_mesh/capture.py"
+                expected = inspected["members"].get("decision_mesh/capture.py")
+                require(type(expected) is str, "child_data_guard_unavailable")
+                child_entry(guard, held, capture=True)
+                owner_check = load_exact(guard, "standard_child_owner_guard",
+                                         expected_sha256=expected).assert_owner_only
+                require(callable(owner_check), "child_data_guard_unavailable")
+                prepared = child_data_inventory(data, held, owner_check, capture=True)
+            except BaseException as error:  # noqa: BLE001 - preserve proof; all uncertainty forbids deletion
+                preparation_failure = child_data_failure(error)
         completed = real_run(args, **kwargs)
+        if enrolling and completed.returncode == 0:
+            child_entry(data, held, capture=True)
         if completed.returncode == 0 and command[-2:] == ["pip", "check"]:
             package = {p: h for p, h in inspected["members"].items()
                        if p.startswith("decision_mesh/")}
@@ -425,11 +633,25 @@ def child_smoke(fixture: Path, api: Any, env: dict[str, str]) -> dict:
     try:
         smoke = checker.smoke_install(wheel, work)
         require(all(proof.values()), "runtime_proof_missing")
-        return {"status": "PASS", "sid": config["sid"], "token": token, "profile": str(profile),
-                "wheel_sha256": digest(wheel), "smoke": smoke, **proof,
-                "python_version": sys.version.split()[0], "platform": platform.platform(),
-                "limits": ["No native host/channel/browser/logon/sleep qualification",
-                           "Hosted Windows Server standard child; consumer Windows/UAC unqualified"]}
+        require(all(smoke.get(k) is True for k in (
+            "installed_runtime_stopped", "same_version_reinstall_preserved_data",
+            "uninstall_preserved_data_and_removed_package")), "smoke_preservation_unproven")
+        result = {"status": "PASS", "sid": config["sid"], "token": token, "profile": str(profile),
+                  "wheel_sha256": digest(wheel), "smoke": smoke, **proof,
+                  "python_version": sys.version.split()[0], "platform": platform.platform(),
+                  "limits": ["No native host/channel/browser/logon/sleep qualification",
+                             "Hosted Windows Server standard child; consumer Windows/UAC unqualified"]}
+        try:
+            require(uninstall_seen and prepared is not None and owner_check is not None,
+                    "child_data_guard_unavailable")
+            cleanup = preparation_failure or remove_child_data(data, held, prepared,
+                                                               owner_check, context)
+        except BaseException as error:  # noqa: BLE001 - retain successful smoke and fixed cleanup code
+            cleanup = preparation_failure or child_data_failure(error)
+        result["child_fixture_cleanup"] = cleanup
+        if cleanup["status"] != "PASS":
+            result["status"] = "FAILED_CHILD_FIXTURE_CLEANUP"
+        return result
     finally:
         if runtime:
             api.close(runtime)
@@ -453,8 +675,12 @@ def main() -> int:
                             "standard_user_native").Native()
         if args.child:
             result = child_smoke(args.fixture_root, native, dict(os.environ))
-            with (args.fixture_root / "out/result.json").open("x", encoding="utf-8") as output:
-                json.dump(result, output)
+            outcome = args.fixture_root / "out/result.json"
+            safe_path(outcome, missing=True)
+            body = json.dumps(result)
+            require(len(body.encode("utf-8")) < 128 * 1024, "result_bounds")
+            with outcome.open("x", encoding="utf-8") as output:
+                output.write(body)
         else:
             require(args.input_manifest is not None, "input_manifest_required")
             regular(args.input_manifest)

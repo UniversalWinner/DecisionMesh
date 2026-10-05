@@ -149,7 +149,13 @@ class FakeNative:
         self.exit = True
         self.job_alive = False
         (self.fixture / "out/result.json").write_text(json.dumps({
-            "status": "PASS", "sid": SID, "runtime_exited": True, "lifetime_lock_released": True
+            "status": "PASS", "sid": SID, "runtime_exited": True, "lifetime_lock_released": True,
+            "installed_package_bytes_equal": True,
+            "smoke": {"installed_runtime_stopped": True,
+                      "same_version_reinstall_preserved_data": True,
+                      "uninstall_preserved_data_and_removed_package": True},
+            "child_fixture_cleanup": {"status": "PASS", "files_removed": 1,
+                                      "directories_removed": 1}
         }))
 
     def wait(self, process, timeout):
@@ -394,56 +400,37 @@ def test_native_import_is_inert_and_no_netcredentials_path_exists():
 
 
 @pytest.mark.parametrize("fault", [None, "live_runtime", "held_lock", "offline", "package"])
-def test_child_smoke_requires_exact_package_actual_exit_lock_and_offline(case, monkeypatch, fault):
-    fixture, inputs, _env = case
-    monkeypatch.setattr(q.sys, "executable", inputs["python"]["path"])
-    api = FakeNative(fixture)
-    api.profile.mkdir()
-    (api.profile / "AppData/Local").mkdir(parents=True)
-    q.prepare_fixture(fixture, q.validate_inputs(inputs, fixture), PARENT, SID, api, api.profile)
-    child_env = q.target_environment(api.profile, fixture, fixture.parent / "Windows",
-                                     Path(inputs["python"]["path"]))
-    api.token = lambda process=None: token()
-    api.loaded_profile = lambda sid: True
-    api.runtime_handle = lambda port, sid, image: "retained-runtime"
-    api.wait = lambda handle, timeout: fault != "live_runtime"
-    api.exit_code = lambda handle: 0
-    calls = []
-    body = b"accepted package file"
-    checker = SimpleNamespace()
-    checker.inspect_archive = lambda wheel: {
-        "members": {"decision_mesh/capture.py": q.hashlib.sha256(body).hexdigest()}
-    }
-    def fake_run(args, **kwargs):
-        calls.append([str(a) for a in args])
-        failed = fault == "held_lock" and "owner_file_lock" in " ".join(map(str, args))
-        return SimpleNamespace(returncode=1 if failed else 0, stdout="", stderr="")
-    monkeypatch.setattr(q.subprocess, "run", fake_run)
-    monkeypatch.setattr(q, "load_exact", lambda *args: checker)
-    def smoke(wheel, work):
-        data = work / "user-data"
-        data.mkdir(parents=True)
-        package = work / "environment/Lib/site-packages/decision_mesh"
-        package.mkdir(parents=True)
-        (package / "capture.py").write_bytes(b"modified" if fault == "package" else body)
-        (data / "runtime.json").write_text('{"port": 12345}')
-        selected = dict(child_env)
-        if fault == "offline":
-            selected["PIP_NO_INDEX"] = "0"
-        for args in (["python", "-m", "pip", "check"],
-                     ["command", "setup", "--verify-local"], ["command", "stop"]):
-            checker.subprocess.run(args, env=selected)
-        return {"synthetic_smoke": True}
-    checker.smoke_install = smoke
+def test_child_smoke_requires_exact_package_actual_exit_lock_and_offline(
+        child_cleanup_case, monkeypatch, fault):
+    fixture, api, env, work, _data, state = child_cleanup_case
+    if fault == "live_runtime":
+        api.wait = lambda *args: False
+    if fault == "held_lock":
+        original = q.subprocess.run
+        def held(args, **kwargs):
+            if "owner_file_lock" in " ".join(map(str, args)):
+                return SimpleNamespace(returncode=1)
+            return original(args, **kwargs)
+        monkeypatch.setattr(q.subprocess, "run", held)
+    if fault == "offline":
+        env["PIP_NO_INDEX"] = "0"
+    if fault == "package":
+        def tamper(command):
+            if command[-2:] == ["pip", "check"]:
+                (work / "environment/Lib/site-packages/decision_mesh/capture.py").write_bytes(b"changed")
+        state["before_run"] = tamper
     if fault:
         with pytest.raises(q.QualificationError):
-            q.child_smoke(fixture, api, child_env)
+            q.child_smoke(fixture, api, env)
+        assert state["before_uninstall"] is None
+        assert "load_installed_guard" not in state["events"]
     else:
-        result = q.child_smoke(fixture, api, child_env)
+        result = q.child_smoke(fixture, api, env)
         assert result["runtime_exited"] and result["lifetime_lock_released"]
         assert result["installed_package_bytes_equal"]
+        assert result["child_fixture_cleanup"]["status"] == "PASS"
     if fault == "offline":
-        assert not calls
+        assert not state["events"]
 
 
 def test_profile_replacement_prevents_profile_and_account_deletion(case, monkeypatch):
@@ -1124,3 +1111,396 @@ def test_optional_residual_baseline_cannot_hide_root_replacement_before_delete(
     with pytest.raises(native.NativeError):
         api.delete_profile(SID, profile, owned_work=work)
     assert not state["calls"], "replacement discovered before deletion must prevent deletion"
+
+
+@pytest.fixture
+def child_cleanup_case(case, monkeypatch):
+    """Complete smoke contract over fake processes and ordinary temporary data."""
+    fixture, inputs, _env = case
+    monkeypatch.setattr(q.sys, "executable", inputs["python"]["path"])
+    api = FakeNative(fixture)
+    api.profile.mkdir()
+    (api.profile / "AppData/Local").mkdir(parents=True)
+    q.prepare_fixture(fixture, q.validate_inputs(inputs, fixture), PARENT, SID, api, api.profile)
+    env = q.target_environment(api.profile, fixture, fixture.parent / "Windows",
+                               Path(inputs["python"]["path"]))
+    api.token = lambda process=None: token()
+    api.loaded_profile = lambda sid: True
+    api.runtime_handle = lambda *args: "runtime"
+    api.wait = lambda *args: True
+    api.exit_code = lambda *args: 0
+    work = api.profile / "AppData/Local" / fixture.name
+    data = work / "user-data"
+    package = work / "environment/Lib/site-packages/decision_mesh"
+    guard = b"def assert_owner_only(path):\n    return None\n"
+    checker = SimpleNamespace(inspect_archive=lambda wheel: {
+        "members": {"decision_mesh/capture.py": q.hashlib.sha256(guard).hexdigest()}})
+    state = {"events": [], "before_uninstall": None, "after_uninstall": None,
+             "cleanup_failure": None, "before_run": None}
+    original_load = q.load_exact
+    def load(path, name, **kwargs):
+        if path.name == "check_python_distribution.py":
+            return checker
+        state["events"].append("load_installed_guard")
+        return original_load(path, name, **kwargs)
+    monkeypatch.setattr(q, "load_exact", load)
+    def real_run(args, **kwargs):
+        command = [str(x) for x in args]
+        state["events"].append(" ".join(command[1:]))
+        if state["before_run"]:
+            state["before_run"](command)
+        if command[1:3] == ["producer", "enroll"]:
+            (data / "nested").mkdir(parents=True)
+            (data / "nested/sample.json").write_text('{"synthetic":true}')
+        if "--verify-local" in command:
+            (data / "runtime.json").write_text('{"port":12345}')
+        if "stop" in command:
+            (data / "runtime.json").unlink()
+        if "uninstall" in command:
+            state["before_uninstall"] = {p.relative_to(data).as_posix(): p.read_bytes()
+                                         for p in data.rglob("*") if p.is_file()}
+            (package / "capture.py").unlink()
+            package.rmdir()
+            if state["after_uninstall"]:
+                state["after_uninstall"]()
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+    monkeypatch.setattr(q.subprocess, "run", real_run)
+    def smoke(wheel, selected_work):
+        assert selected_work == work and not work.exists()
+        package.mkdir(parents=True)
+        (package / "capture.py").write_bytes(guard)
+        for args in (["python", "-m", "pip", "install", str(wheel)],
+                     ["python", "-m", "pip", "check"],
+                     ["command", "producer", "enroll"],
+                     ["command", "setup", "--verify-local"],
+                     ["command", "setup", "--verify-local"],
+                     ["command", "stop"],
+                     ["python", "-m", "pip", "install", "--force-reinstall", str(wheel)],
+                     ["python", "-m", "pip", "uninstall", "--yes", "decision-mesh"]):
+            checker.subprocess.run(args, env=env)
+        state["events"].append("smoke_preservation_proved")
+        assert not package.exists() and data.exists()
+        return {"dependency_check": "passed", "installed_runtime_stopped": True,
+                "same_version_reinstall_preserved_data": True,
+                "uninstall_preserved_data_and_removed_package": True,
+                "installed_runtime_local_verification_twice": [{"ok": True}, {"ok": True}]}
+    checker.smoke_install = smoke
+    return fixture, api, env, work, data, state
+
+
+def test_child_removes_only_synthetic_data_after_smoke_preservation_proof(child_cleanup_case):
+    fixture, api, env, work, data, state = child_cleanup_case
+    result = q.child_smoke(fixture, api, env)
+    assert state["before_uninstall"] == {"nested/sample.json": b'{"synthetic":true}'}
+    assert result["smoke"]["uninstall_preserved_data_and_removed_package"]
+    assert result["runtime_exited"] and result["lifetime_lock_released"]
+    assert result["installed_package_bytes_equal"]
+    assert not data.exists(), "synthetic retained data must be removed by the owning child"
+    assert result["child_fixture_cleanup"]["status"] == "PASS"
+    assert work.is_dir() and (work / "environment").is_dir() and api.profile.is_dir()
+
+
+@pytest.fixture
+def synthetic_inventory(tmp_path):
+    profile = tmp_path / "profile"
+    work = profile / "AppData/Local" / ("decisionmesh-standard-user-" + NONCE)
+    data = work / "user-data"
+    (data / "nested").mkdir(parents=True)
+    (data / "a.json").write_bytes(b"synthetic-a")
+    (data / "nested/b.json").write_bytes(b"synthetic-b")
+    (work / "environment").mkdir()
+    held, owners = {}, []
+    q.child_entry(work, held, capture=True)
+    def owner(path):
+        assert path.is_relative_to(data), "ordinary profile ancestors do not have owner-only DACLs"
+        owners.append(path)
+    expected = q.child_data_inventory(data, held, owner, capture=True)
+    return profile, work, data, held, expected, owner, owners
+
+
+def altered_stat(info, **changes):
+    fields = {k: getattr(info, k) for k in dir(info) if k.startswith("st_")}
+    return SimpleNamespace(**(fields | changes))
+
+
+@pytest.mark.parametrize("fault", ["new", "missing", "content", "file_identity", "data_identity",
+                                  "work_identity", "profile_identity", "reparse", "hardlink",
+                                  "foreign_owner", "file_limit", "total_limit", "entry_limit",
+                                  "depth_limit"])
+def test_entire_inventory_preflight_refuses_before_any_delete(synthetic_inventory, monkeypatch, fault):
+    profile, work, data, held, expected, owner, _owners = synthetic_inventory
+    sample = data / "a.json"
+    if fault == "new":
+        (data / "extra.json").write_bytes(b"unexpected")
+    elif fault == "missing":
+        sample.unlink()
+    elif fault == "content":
+        sample.write_bytes(b"synthetic-x")  # Same length, different digest.
+    elif fault in {"file_identity", "data_identity", "work_identity", "profile_identity", "reparse", "hardlink"}:
+        target = {"data_identity": data, "work_identity": work,
+                  "profile_identity": profile}.get(fault, sample)
+        original = Path.lstat
+        def changed(path, *args, **kwargs):
+            info = original(path, *args, **kwargs)
+            if path == target:
+                field = "st_file_attributes" if fault == "reparse" else "st_nlink" if fault == "hardlink" else "st_ino"
+                value = 1024 if fault == "reparse" else 2 if fault == "hardlink" else info.st_ino + 1
+                return altered_stat(info, **{field: value})
+            return info
+        monkeypatch.setattr(Path, "lstat", changed)
+    elif fault == "foreign_owner":
+        def owner(path):
+            if path == data / "nested":
+                raise PermissionError("PRIVATE-owner")
+    else:
+        field, value = {"file_limit": ("DATA_MAX_FILE_BYTES", 3),
+                        "total_limit": ("DATA_MAX_TOTAL_BYTES", 12),
+                        "entry_limit": ("DATA_MAX_ENTRIES", 3),
+                        "depth_limit": ("DATA_MAX_DEPTH", 1)}[fault]
+        monkeypatch.setattr(q, field, value)
+    deleted = []
+    monkeypatch.setattr(Path, "unlink", lambda path, *a, **k: deleted.append(path))
+    monkeypatch.setattr(Path, "rmdir", lambda path: deleted.append(path))
+    with pytest.raises((q.QualificationError, FileNotFoundError)):
+        q.remove_child_data(data, held, expected, owner, lambda: q.child_entry(work, held))
+    assert not deleted
+    assert work.is_dir() and (work / "environment").is_dir()
+
+
+@pytest.mark.parametrize("unsafe", ["identity", "reparse", "owner"])
+def test_unsafe_ancestor_is_rejected_before_descendant_read(synthetic_inventory, monkeypatch, unsafe):
+    _profile, work, data, held, expected, owner, _owners = synthetic_inventory
+    original, descendants = Path.lstat, []
+    def changed(path, *args, **kwargs):
+        if path.is_relative_to(data) and path != data:
+            descendants.append(path)
+            raise AssertionError("unsafe ancestor must prevent descendant traversal")
+        info = original(path, *args, **kwargs)
+        if path == data and unsafe != "owner":
+            return altered_stat(info, **({"st_ino": info.st_ino + 1} if unsafe == "identity"
+                                        else {"st_file_attributes": 1024}))
+        return info
+    monkeypatch.setattr(Path, "lstat", changed)
+    if unsafe == "owner":
+        def owner(path):
+            raise PermissionError("PRIVATE")
+    with pytest.raises(q.QualificationError):
+        q.remove_child_data(data, held, expected, owner, lambda: q.child_entry(work, held))
+    assert not descendants
+
+
+@pytest.mark.parametrize("fault", ["content", "identity", "hardlink", "reparse", "owner"])
+def test_each_entry_is_rechecked_after_whole_preflight(synthetic_inventory, monkeypatch, fault):
+    _profile, work, data, held, expected, owner, _owners = synthetic_inventory
+    original, context_calls, deleted = Path.lstat, [], []
+    def context():
+        context_calls.append(True)
+        q.child_entry(work, held)
+        if len(context_calls) == 2:
+            if fault == "content":
+                (data / "a.json").write_bytes(b"synthetic-x")
+            elif fault != "owner":
+                def changed(path, *args, **kwargs):
+                    info = original(path, *args, **kwargs)
+                    if path == data / "a.json":
+                        changes = {"identity": {"st_ino": info.st_ino + 1},
+                                   "hardlink": {"st_nlink": 2},
+                                   "reparse": {"st_file_attributes": 1024}}[fault]
+                        return altered_stat(info, **changes)
+                    return info
+                monkeypatch.setattr(Path, "lstat", changed)
+    original_owner = owner
+    def owner(path):
+        original_owner(path)
+        if fault == "owner" and len(context_calls) >= 2 and path == data:
+            raise PermissionError("PRIVATE")
+    monkeypatch.setattr(Path, "unlink", lambda path, *a, **k: deleted.append(path))
+    monkeypatch.setattr(Path, "rmdir", lambda path: deleted.append(path))
+    with pytest.raises(q.QualificationError):
+        q.remove_child_data(data, held, expected, owner, context)
+    assert len(context_calls) == 2 and not deleted
+
+
+def test_inventory_success_keeps_profile_work_and_environment(synthetic_inventory):
+    profile, work, data, held, expected, owner, owners = synthetic_inventory
+    result = q.remove_child_data(data, held, expected, owner, lambda: q.child_entry(work, held))
+    assert result == {"status": "PASS", "files_removed": 2, "directories_removed": 2}
+    assert not data.exists() and profile.is_dir() and work.is_dir()
+    assert (work / "environment").is_dir() and all(p.is_relative_to(data) for p in owners)
+
+
+@pytest.mark.parametrize("fault", ["sid", "environment", "profile", "unloaded", "content", "new_file",
+                                  "guard_tampered", "partial_delete"])
+def test_child_cleanup_failure_retains_smoke_proof(child_cleanup_case, monkeypatch, fault):
+    fixture, api, env, work, data, state = child_cleanup_case
+    def change():
+        if fault == "sid":
+            api.token = lambda *args: token(PARENT)
+        elif fault == "environment":
+            env["LOCALAPPDATA"] = str(work)
+        elif fault == "profile":
+            api.profile_path = lambda *args: work
+        elif fault == "unloaded":
+            api.loaded_profile = lambda *args: False
+        elif fault == "content":
+            (data / "nested/sample.json").write_bytes(b"PRIVATE-changed")
+        elif fault == "new_file":
+            (data / "unexpected").write_bytes(b"PRIVATE")
+        elif fault == "partial_delete":
+            original = Path.rmdir
+            def deny(path):
+                if path == data / "nested":
+                    raise PermissionError("PRIVATE-cleanup")
+                return original(path)
+            monkeypatch.setattr(Path, "rmdir", deny)
+    state["after_uninstall"] = change
+    if fault == "guard_tampered":
+        def tamper(command):
+            if "--force-reinstall" in command:
+                (work / "environment/Lib/site-packages/decision_mesh/capture.py").write_bytes(
+                    b"raise RuntimeError('PRIVATE-must-not-execute')")
+        state["before_run"] = tamper
+    result = q.child_smoke(fixture, api, env)
+    assert result["status"] == "FAILED_CHILD_FIXTURE_CLEANUP"
+    assert result["child_fixture_cleanup"]["status"] == "FAILED"
+    assert result["smoke"]["uninstall_preserved_data_and_removed_package"]
+    assert result["runtime_exited"] and result["lifetime_lock_released"]
+    assert result["installed_package_bytes_equal"]
+    assert "PRIVATE" not in json.dumps(result) and data.exists()
+    assert not (work / "environment/Lib/site-packages/decision_mesh").exists()
+    if fault == "partial_delete":
+        assert not (data / "nested/sample.json").exists()
+    else:
+        assert (data / "nested/sample.json").exists()
+
+
+def test_guard_snapshot_and_deletion_order(child_cleanup_case, monkeypatch):
+    fixture, api, env, _work, data, state = child_cleanup_case
+    inventory, remove = q.child_data_inventory, q.remove_child_data
+    def snapshot(*args, **kwargs):
+        if kwargs.get("capture"):
+            state["events"].append("snapshot_before_uninstall")
+        return inventory(*args, **kwargs)
+    def cleanup(*args):
+        state["events"].append("delete_after_smoke_proof")
+        return remove(*args)
+    monkeypatch.setattr(q, "child_data_inventory", snapshot)
+    monkeypatch.setattr(q, "remove_child_data", cleanup)
+    assert q.child_smoke(fixture, api, env)["status"] == "PASS"
+    events = state["events"]
+    lock = next(i for i, event in enumerate(events) if "owner_file_lock" in event)
+    assert events.index("stop") < lock < events.index("load_installed_guard")
+    assert events.index("load_installed_guard") < events.index("snapshot_before_uninstall")
+    assert events.index("snapshot_before_uninstall") < events.index("-m pip uninstall --yes decision-mesh")
+    assert events.index("-m pip uninstall --yes decision-mesh") < events.index("smoke_preservation_proved")
+    assert events.index("smoke_preservation_proved") < events.index("delete_after_smoke_proof")
+    assert events.count("load_installed_guard") == 1 and not data.exists()
+
+
+@pytest.mark.parametrize("exit_code,status", [(1, "PASS"), (1, "FAILED_CHILD_FIXTURE_CLEANUP"),
+                                             (0, "FAILED_CHILD_FIXTURE_CLEANUP")])
+def test_parent_retains_bounded_child_proof_without_promoting_failure(case, exit_code, status):
+    api = FakeNative(case[0])
+    resume = api.resume
+    def failed(thread):
+        resume(thread)
+        report = case[0] / "out/result.json"
+        result = json.loads(report.read_text())
+        result["status"] = status
+        if status != "PASS":
+            result["child_fixture_cleanup"] = {"status": "FAILED", "code": "child_data_cleanup_failed"}
+        report.write_text(json.dumps(result))
+    api.resume, api.exit_code = failed, lambda *args: exit_code
+    result = run(case, api)
+    assert result["status"] == "FAILED_OR_UNSUPPORTED" and result["cleanup_complete"]
+    assert result["child"]["smoke"]["uninstall_preserved_data_and_removed_package"]
+    assert result["child"]["status"] == status
+    assert not case[0].exists() and api.current is None
+
+
+@pytest.mark.parametrize("fault", ["unknown_field", "unknown_code", "boolean_count", "overlimit_count",
+                                  "failed_as_pass", "missing_proof", "oversize"])
+def test_parent_refuses_unbounded_or_inconsistent_child_report(case, fault):
+    api = FakeNative(case[0])
+    resume = api.resume
+    def malformed(thread):
+        resume(thread)
+        report = case[0] / "out/result.json"
+        result = json.loads(report.read_text())
+        cleanup = result["child_fixture_cleanup"]
+        if fault == "unknown_field":
+            cleanup["PRIVATE"] = "PRIVATE"
+        elif fault == "unknown_code":
+            result["status"] = "FAILED_CHILD_FIXTURE_CLEANUP"
+            result["child_fixture_cleanup"] = {"status": "FAILED", "code": "PRIVATE"}
+        elif fault == "boolean_count":
+            cleanup["files_removed"] = True
+        elif fault == "overlimit_count":
+            cleanup["files_removed"] = q.DATA_MAX_ENTRIES + 1
+        elif fault == "failed_as_pass":
+            result["child_fixture_cleanup"] = {"status": "FAILED", "code": "child_data_cleanup_failed"}
+        elif fault == "missing_proof":
+            result["runtime_exited"] = False
+        else:
+            result["PRIVATE"] = "PRIVATE" * (128 * 1024)
+        report.write_text(json.dumps(result))
+    api.resume = malformed
+    result = run(case, api)
+    assert result["status"] != "PASS" and "child" not in result
+    assert "PRIVATE" not in json.dumps(result)
+
+
+def test_exact_guard_loader_checks_hash_before_execution_and_supports_dataclasses(tmp_path, monkeypatch):
+    import sys
+    path = tmp_path / "guard.py"
+    path.write_bytes(b"raise AssertionError('unchecked source executed')\n")
+    with pytest.raises(q.QualificationError, match="installed_guard_changed"):
+        q.load_exact(path, "synthetic_guard", expected_sha256="0" * 64)
+    body = b"from dataclasses import dataclass\n@dataclass\nclass Guard:\n    value: int = 1\n"
+    path.write_bytes(body)
+    previous = object()
+    monkeypatch.setitem(sys.modules, "synthetic_guard", previous)
+    module = q.load_exact(path, "synthetic_guard", expected_sha256=q.hashlib.sha256(body).hexdigest())
+    assert module.Guard().value == 1 and sys.modules["synthetic_guard"] is previous
+
+
+def test_child_cleanup_failure_sanitizer_ignores_hostile_exception():
+    class Hostile(RuntimeError):
+        def __str__(self):
+            raise AssertionError("must not format private exception")
+    error = Hostile("PRIVATE")
+    error.code = "PRIVATE"
+    assert q.child_data_failure(error) == {"status": "FAILED", "code": "child_data_cleanup_failed"}
+
+
+@pytest.mark.parametrize("limit", ["DATA_MAX_ENTRIES", "DATA_MAX_FILE_BYTES"])
+def test_inventory_preparation_failure_still_retains_completed_uninstall_proof(
+        child_cleanup_case, monkeypatch, limit):
+    fixture, api, env, _work, data, state = child_cleanup_case
+    monkeypatch.setattr(q, limit, 1)
+    result = q.child_smoke(fixture, api, env)
+    assert result["status"] == "FAILED_CHILD_FIXTURE_CLEANUP"
+    assert result["child_fixture_cleanup"] == {"status": "FAILED", "code": "child_data_bounds"}
+    assert result["smoke"]["uninstall_preserved_data_and_removed_package"]
+    assert state["before_uninstall"] and (data / "nested/sample.json").exists()
+
+
+def test_child_main_writes_smoke_proof_and_returns_failure_for_partial_cleanup(case, monkeypatch, capsys):
+    fixture = case[0]
+    (fixture / "out").mkdir(parents=True)
+    result = {"status": "FAILED_CHILD_FIXTURE_CLEANUP", "sid": SID,
+              "runtime_exited": True, "lifetime_lock_released": True,
+              "installed_package_bytes_equal": True,
+              "smoke": {"installed_runtime_stopped": True,
+                        "same_version_reinstall_preserved_data": True,
+                        "uninstall_preserved_data_and_removed_package": True},
+              "child_fixture_cleanup": {"status": "FAILED", "code": "child_data_cleanup_failed"}}
+    monkeypatch.setattr(q.sys, "argv", ["helper", "--child", "--run-hosted",
+                                       "--fixture-root", str(fixture)])
+    monkeypatch.setattr(q, "runner_guard", lambda *args, **kwargs: None)
+    monkeypatch.setattr(q, "load_exact", lambda *args: SimpleNamespace(Native=lambda: object()))
+    monkeypatch.setattr(q, "child_smoke", lambda *args: result)
+    assert q.main() == 1
+    assert json.loads((fixture / "out/result.json").read_text()) == result
+    assert json.loads(capsys.readouterr().out) == {
+        "status": "FAILED_CHILD_FIXTURE_CLEANUP", "cleanup_complete": False}

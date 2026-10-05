@@ -228,7 +228,7 @@ class Native:
         return token
 
     def create_profile(self, name: str, sid: str) -> Path:
-        buf = C.create_unicode_buffer(32768)
+        buf = C.create_unicode_buffer(260)
         code = self.call("userenv", "CreateProfile", C.c_long,
                          [W.LPCWSTR, W.LPCWSTR, W.LPWSTR, W.DWORD],
                          sid, name, buf, len(buf))

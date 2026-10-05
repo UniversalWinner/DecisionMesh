@@ -612,13 +612,14 @@ def test_registry_uncertainty_blocks_profile_deletion(case, monkeypatch, code):
     assert not calls
 
 
-@pytest.mark.parametrize("status", [0, 1, 0x80070005, 0x800700B7])
+@pytest.mark.parametrize("status", [0, 1, 0x80070005, 0x800700B7, 0x800706F7])
 def test_create_profile_preserves_exact_hresult_and_documented_call_shape(case, monkeypatch, status):
     api = object.__new__(native.Native)
     def call(lib, name, result, types, *args):
         assert (lib, name, result) == ("userenv", "CreateProfile", ctypes.c_long)
         assert types == [native.W.LPCWSTR, native.W.LPCWSTR, native.W.LPWSTR, native.W.DWORD]
-        assert args[:2] == (SID, "dmqfixture") and args[3] == 32768
+        assert args[:2] == (SID, "dmqfixture")
+        assert args[3] == len(args[2]) == 260
         args[2].value = str(case[0])
         return ctypes.c_int32(status).value
     api.call = call

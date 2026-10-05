@@ -242,13 +242,14 @@ def _windows_acl(path: Path, create: bool) -> None:
     if create:
         descriptor = ctypes.c_void_p()
         inheritance = "OICI" if path.is_dir() else ""
-        sddl = f"D:P(A;{inheritance};FA;;;{sid})"
+        sddl = f"O:{sid}D:P(A;{inheritance};FA;;;{sid})"
         if not advapi.ConvertStringSecurityDescriptorToSecurityDescriptorW(
             sddl, 1, ctypes.byref(descriptor), None
         ):
             raise CaptureError("owner_acl_unavailable")
         try:
-            if not advapi.SetFileSecurityW(str(path), 0x80000004, descriptor):
+            # PROTECTED_DACL | OWNER | DACL: a default owner may differ from TokenUser.
+            if not advapi.SetFileSecurityW(str(path), 0x80000005, descriptor):
                 raise CaptureError("owner_acl_unavailable")
         finally:
             kernel.LocalFree(descriptor)
@@ -280,6 +281,12 @@ def _validate_windows_descriptor(descriptor: Any, current_sid: str, *, directory
         ctypes.POINTER(wintypes.LPWSTR),
         ctypes.POINTER(wintypes.DWORD),
     ]
+    advapi.ConvertStringSecurityDescriptorToSecurityDescriptorW.argtypes = [
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        ctypes.POINTER(ctypes.c_void_p),
+        ctypes.POINTER(wintypes.DWORD),
+    ]
     kernel.LocalFree.argtypes = [ctypes.c_void_p]
     owner = ctypes.c_void_p()
     defaulted = wintypes.BOOL()
@@ -305,9 +312,27 @@ def _validate_windows_descriptor(descriptor: Any, current_sid: str, *, directory
         raise CaptureError("owner_acl_unavailable")
     try:
         inheritance = "OICI" if directory else ""
-        expected = f"D:P(A;{inheritance};FA;;;{current_sid})"
-        if text.value != expected:
-            raise CaptureError("owner_acl_invalid")
+        # Windows may render a full SID as its SDDL alias (e.g. LA or SY).
+        # Serialize the exact expected descriptor through the same native API;
+        # retain exact owner, principal, ACE count, access and inheritance checks.
+        expected = ctypes.c_void_p()
+        if not advapi.ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            f"D:P(A;{inheritance};FA;;;{current_sid})", 1, ctypes.byref(expected), None
+        ):
+            raise CaptureError("owner_acl_unavailable")
+        try:
+            expected_text = wintypes.LPWSTR()
+            if not advapi.ConvertSecurityDescriptorToStringSecurityDescriptorW(
+                expected, 1, 4, ctypes.byref(expected_text), None
+            ):
+                raise CaptureError("owner_acl_unavailable")
+            try:
+                if text.value != expected_text.value:
+                    raise CaptureError("owner_acl_invalid")
+            finally:
+                kernel.LocalFree(ctypes.cast(expected_text, ctypes.c_void_p))
+        finally:
+            kernel.LocalFree(expected)
     finally:
         kernel.LocalFree(ctypes.cast(text, ctypes.c_void_p))
 
@@ -332,6 +357,7 @@ def assert_owner_only(path: Path) -> None:
 
 
 def _protect_new(path: Path, directory: bool = False) -> None:
+    """Protect only an object the caller has just created successfully."""
     if os.name == "nt":
         _windows_acl(path, True)
     else:

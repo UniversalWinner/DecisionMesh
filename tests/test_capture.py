@@ -492,7 +492,10 @@ except CaptureError as error:
 @pytest.mark.skipif(os.name != "nt", reason="Native Windows security descriptor regression")
 @pytest.mark.parametrize("directory", [False, True], ids=["file", "directory"])
 @pytest.mark.parametrize("owner", ["current", "foreign", "missing"])
-def test_native_descriptor_owner_is_independent_of_exact_protected_dacl(directory, owner):
+@pytest.mark.parametrize("identity", ["current-user", "local-administrator", "system"])
+def test_native_descriptor_owner_is_independent_of_exact_protected_dacl(
+    directory, owner, identity
+):
     """Native in-memory descriptor fixture; no cross-account object assignment."""
     import ctypes
     from ctypes import wintypes
@@ -507,7 +510,13 @@ def test_native_descriptor_owner_is_independent_of_exact_protected_dacl(director
     ]
     kernel.LocalFree.argtypes = [ctypes.c_void_p]
     sid = capture._windows_sid()
-    owner_prefix = f"O:{sid}" if owner == "current" else ("O:SY" if owner == "foreign" else "")
+    if identity == "local-administrator":
+        if not sid.startswith("S-1-5-21-"):
+            pytest.skip("Local/domain account SID needed for the local administrator alias")
+        sid = sid.rsplit("-", 1)[0] + "-500"
+    elif identity == "system":
+        sid = "S-1-5-18"
+    owner_prefix = f"O:{sid}" if owner == "current" else ("O:BA" if owner == "foreign" else "")
     inherit = "OICI" if directory else ""
     text = f"{owner_prefix}D:P(A;{inherit};FA;;;{sid})"
     descriptor = ctypes.c_void_p()
@@ -523,6 +532,121 @@ def test_native_descriptor_owner_is_independent_of_exact_protected_dacl(director
                 capture._validate_windows_descriptor(descriptor, sid, directory=directory)
     finally:
         kernel.LocalFree(descriptor)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Native Windows owner-setting contract")
+@pytest.mark.parametrize("directory", [False, True], ids=["file", "directory"])
+def test_new_object_protection_explicitly_assigns_current_user_owner(
+    tmp_path, monkeypatch, directory
+):
+    """Assert the native ownership request without changing token defaults."""
+    import ctypes
+
+    path = tmp_path / "new-object"
+    if directory:
+        path.mkdir()
+    else:
+        path.write_bytes(b"new")
+    real_loader = ctypes.WinDLL
+    advapi = real_loader("advapi32", use_last_error=True)
+    requested = []
+
+    def set_security(name, information, descriptor):
+        assert information & 1, "New object protection must explicitly set its owner"
+        capture._validate_windows_descriptor(
+            descriptor, capture._windows_sid(), directory=directory
+        )
+        requested.append(information)
+        return advapi.SetFileSecurityW(name, information, descriptor)
+
+    class AdvapiProxy:
+        SetFileSecurityW = staticmethod(set_security)
+
+        def __getattr__(self, name):
+            return getattr(advapi, name)
+
+    monkeypatch.setattr(
+        ctypes, "WinDLL", lambda name, **kwargs: (
+            AdvapiProxy() if name == "advapi32" else real_loader(name, **kwargs)
+        )
+    )
+    capture._protect_new(path, directory=directory)
+    assert len(requested) == 1
+    capture.assert_owner_only(path)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Native Windows exact DACL regression")
+@pytest.mark.parametrize("directory", [False, True], ids=["file", "directory"])
+@pytest.mark.parametrize(
+    "change",
+    [
+        "foreign-administrator", "administrators-group", "system", "extra-user",
+        "extra-group", "unprotected", "wrong-inheritance", "inherit-only",
+        "read-only", "deny", "empty", "null", "auto-inherited",
+    ],
+)
+def test_native_descriptor_alias_does_not_relax_exact_dacl(directory, change):
+    """In-memory local-administrator SID; never assign another account to a file."""
+    import ctypes
+    from ctypes import wintypes
+
+    sid = capture._windows_sid()
+    if not sid.startswith("S-1-5-21-"):
+        pytest.skip("Local/domain account SID needed for the local administrator alias")
+    sid = sid.rsplit("-", 1)[0] + "-500"
+    inherit = "OICI" if directory else ""
+    ace = f"(A;{inherit};FA;;;{sid})"
+    foreign = "S-1-5-21-111-222-333-500"
+    assert foreign != sid
+    variants = {
+        "foreign-administrator": f"D:P(A;{inherit};FA;;;{foreign})",
+        "administrators-group": f"D:P(A;{inherit};FA;;;BA)",
+        "system": f"D:P(A;{inherit};FA;;;SY)",
+        "extra-user": f"D:P{ace}{ace}",
+        "extra-group": f"D:P{ace}(A;;FA;;;BA)",
+        "unprotected": f"D:{ace}",
+        "wrong-inheritance": f"D:P(A;{'' if directory else 'OICI'};FA;;;{sid})",
+        "inherit-only": f"D:P(A;{inherit}IO;FA;;;{sid})",
+        "read-only": f"D:P(A;{inherit};FR;;;{sid})",
+        "deny": f"D:P(D;{inherit};FA;;;{sid})",
+        "empty": "D:P",
+        "null": "D:NO_ACCESS_CONTROL",
+        "auto-inherited": f"D:PAI{ace}",
+    }
+    advapi = ctypes.WinDLL("advapi32", use_last_error=True)
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    advapi.ConvertStringSecurityDescriptorToSecurityDescriptorW.argtypes = [
+        wintypes.LPCWSTR, wintypes.DWORD, ctypes.POINTER(ctypes.c_void_p),
+        ctypes.POINTER(wintypes.DWORD),
+    ]
+    kernel.LocalFree.argtypes = [ctypes.c_void_p]
+    descriptor = ctypes.c_void_p()
+    assert advapi.ConvertStringSecurityDescriptorToSecurityDescriptorW(
+        f"O:{sid}{variants[change]}", 1, ctypes.byref(descriptor), None
+    )
+    try:
+        with pytest.raises(capture.CaptureError, match="owner_acl_invalid"):
+            capture._validate_windows_descriptor(descriptor, sid, directory=directory)
+    finally:
+        kernel.LocalFree(descriptor)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Native Windows existing-directory refusal")
+def test_existing_directory_with_other_owner_is_never_repaired(tmp_path, monkeypatch):
+    path = capture.ensure_spool_dir(tmp_path / "existing")
+    original_acl = capture._windows_acl
+    modes = []
+
+    def check_acl(path, create):
+        modes.append(create)
+        assert create is False
+        return original_acl(path, create)
+
+    monkeypatch.setattr(capture, "_windows_acl", check_acl)
+    monkeypatch.setattr(capture, "_windows_sid", lambda: "S-1-5-18")
+    with pytest.raises(capture.CaptureError, match="owner_sid_mismatch"):
+        capture.ensure_spool_dir(path)
+    assert modes == [False]
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Native Windows object owner query")

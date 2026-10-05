@@ -1,0 +1,5 @@
+# Keep checked-out text identical across Windows and Unix for byte-level checks.
+* text=auto eol=lf
+
+# Preserve public preview images without text conversion.
+*.png binary

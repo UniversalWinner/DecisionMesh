@@ -112,3 +112,153 @@ jobs:
               "--install-work", str(Path(os.environ["RUNNER_TEMP"]) / "decisionmesh-wheel-smoke"),
               "--report", "dist/ci/install-check.json",
           ], check=True)
+
+      - name: Qualify exact wheel under a fresh hosted standard user
+        if: matrix.python-version == '3.12'
+        shell: python {0}
+        run: |
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+          import stat
+          import subprocess
+          import sys
+          import uuid
+
+          evidence = Path("dist/ci/standard-user").resolve()
+          evidence.mkdir(parents=True, exist_ok=False)
+          scope = "hosted_standard_user_local_core"
+          result = {"status": "FAILED", "scope": scope, "phase": "preflight",
+                    "helper_exit": None, "helper_timed_out": False}
+          report = None
+          helper_started = False
+          stdout = ""
+
+          def require(condition):
+              if not condition:
+                  raise ValueError("qualification_evidence_invalid")
+
+          def entry(path):
+              return {"path": str(path), "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
+
+          def write(name, value):
+              (evidence / name).write_text(json.dumps(value, indent=2) + "\n", encoding="utf-8")
+
+          try:
+              require(os.name == "nt" and sys.version_info[:2] == (3, 12))
+              require(all(os.environ.get(k) == v for k, v in {
+                  "GITHUB_ACTIONS": "true", "RUNNER_ENVIRONMENT": "github-hosted",
+                  "RUNNER_OS": "Windows",
+              }.items()))
+              base = Path(os.environ["RUNNER_TEMP"])
+              require(base.is_absolute())
+              fixture = base / ("decisionmesh-standard-user-" + uuid.uuid4().hex)
+              require(not fixture.exists())
+              report = fixture.with_name(fixture.name + "-result.json")
+              require(not report.exists())
+              wheel = Path(os.environ["DECISIONMESH_TEST_WHEEL"]).resolve()
+              require(wheel.parent == Path("dist/candidate").resolve() and wheel.suffix == ".whl")
+              python = Path(sys.executable).resolve()
+              checker = Path("tools/release/check_python_distribution.py").resolve()
+              helper = Path("tools/release/check_windows_standard_user.py").resolve()
+              native = helper.with_name("windows_standard_user_native.py")
+              provenance = {
+                  "runner": {key: os.environ.get(key) for key in (
+                      "GITHUB_REPOSITORY", "GITHUB_SHA", "GITHUB_REF", "GITHUB_RUN_ID",
+                      "GITHUB_RUN_ATTEMPT", "RUNNER_OS", "RUNNER_ARCH", "RUNNER_ENVIRONMENT",
+                      "ImageOS", "ImageVersion",
+                  )},
+                  "python_version": sys.version,
+                  "fixture": str(fixture),
+                  "files": [entry(p) for p in (
+                      python, wheel, checker, helper, native, Path(".github/workflows/ci.yml").resolve(),
+                  )],
+              }
+              write("provenance.json", provenance)
+              result["phase"] = "offline_dependency_staging"
+              wheelhouse = evidence / "wheelhouse"
+              wheelhouse.mkdir()
+              download = subprocess.run([
+                  str(python), "-I", "-m", "pip", "--isolated", "--disable-pip-version-check",
+                  "download", "--only-binary=:all:", "--index-url", "https://pypi.org/simple",
+                  "--dest", str(wheelhouse), str(wheel),
+              ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=240)
+              result["download_exit"] = download.returncode
+              require(download.returncode == 0)
+              downloaded = sorted(wheelhouse.iterdir())
+              require(all(p.is_file() and p.suffix == ".whl" for p in downloaded))
+              duplicates = [p for p in downloaded if p.name.casefold() == wheel.name.casefold()]
+              require(all(entry(p)["sha256"] == entry(wheel)["sha256"] for p in duplicates))
+              dependencies = [p for p in downloaded if p not in duplicates]
+              require(1 <= len(dependencies) <= 100)
+              manifest = evidence / "input-manifest.json"
+              write(manifest.name, {"schema_version": 1, "python": entry(python),
+                                   "wheel": entry(wheel), "checker": entry(checker),
+                                   "wheelhouse": [entry(p) for p in dependencies]})
+              provenance["manifest"] = entry(manifest)
+              write("provenance.json", provenance)
+              result["phase"] = "hosted_standard_user_execution"
+              try:
+                  helper_started = True
+                  completed = subprocess.run([
+                      str(python), "-I", "-B", str(helper), "--run-hosted",
+                      "--fixture-root", str(fixture), "--input-manifest", str(manifest),
+                  ], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=720)
+                  result["helper_exit"] = completed.returncode
+                  stdout = completed.stdout
+              except subprocess.TimeoutExpired as error:
+                  result["helper_timed_out"] = True
+                  stdout = error.stdout or ""
+                  if isinstance(stdout, bytes):
+                      stdout = stdout.decode("utf-8", errors="replace")
+              require(len(stdout) <= 8192)
+              (evidence / "helper-stdout.txt").write_text(stdout, encoding="utf-8")
+              result["phase"] = "qualification_report"
+          except Exception as error:
+              result["failure_type"] = type(error).__name__
+          finally:
+              accepted = False
+              if helper_started and report is not None and report.exists():
+                  try:
+                      info = report.lstat()
+                      require(stat.S_ISREG(info.st_mode) and info.st_nlink == 1
+                              and not getattr(info, "st_file_attributes", 0) & 1024
+                              and info.st_size <= 128 * 1024)
+                      body = report.read_bytes()
+                      observed = json.loads(body)
+                      (evidence / "helper-report.json").write_bytes(body)
+                      output = json.loads(stdout)
+                      accepted = (
+                          result["phase"] == "qualification_report"
+                          and result["helper_exit"] == 0 and not result["helper_timed_out"]
+                          and observed.get("status") == "PASS"
+                          and observed.get("cleanup_complete") is True
+                          and observed.get("scope") == scope
+                          and output.get("status") == "PASS"
+                          and output.get("cleanup_complete") is True
+                      )
+                  except Exception:
+                      result["report_error"] = "missing_or_invalid_qualification_evidence"
+              result["status"] = "PASS" if accepted else "FAILED"
+              write("result.json", result)
+          if result["status"] != "PASS":
+              raise SystemExit("Standard-user qualification failed; inspect the bounded evidence")
+
+      - name: Upload bounded standard-user qualification evidence
+        if: always() && matrix.python-version == '3.12'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: standard-user-local-core-${{ github.run_id }}-${{ github.run_attempt }}-py${{ matrix.python-version }}
+          retention-days: 7
+          include-hidden-files: false
+          if-no-files-found: warn
+          path: |
+            dist/ci/standard-user/input-manifest.json
+            dist/ci/standard-user/provenance.json
+            dist/ci/standard-user/helper-stdout.txt
+            dist/ci/standard-user/result.json
+            dist/ci/standard-user/helper-report.json
+            dist/candidate/wheel-check.json
+            dist/candidate/source-check.json
+            dist/ci/install-check.json

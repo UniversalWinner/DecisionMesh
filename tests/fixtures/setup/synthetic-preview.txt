@@ -1,0 +1,4 @@
+Decision Mesh setup test
+Synthetic observation only. No real request or approval is included.
+Respond to real requests in the original host.
+Provider acceptance does not prove device delivery or reading.

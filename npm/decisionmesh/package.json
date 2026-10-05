@@ -1,0 +1,52 @@
+{
+  "name": "decisionmesh",
+  "version": "0.1.0-alpha.1",
+  "description": "Decision Mesh bootstrap: versioned event-format JSON Schema for integration development",
+  "license": "MIT",
+  "type": "module",
+  "main": "./index.js",
+  "types": "./index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./index.d.ts",
+      "import": "./index.js"
+    },
+    "./event.schema.json": "./schemas/event.schema.json",
+    "./package.json": "./package.json"
+  },
+  "bin": {
+    "decisionmesh-schema": "./bin/schema.js"
+  },
+  "files": [
+    "index.js",
+    "index.d.ts",
+    "bin/schema.js",
+    "schemas/event.schema.json",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/UniversalWinner/DecisionMesh.git",
+    "directory": "npm/decisionmesh"
+  },
+  "homepage": "https://github.com/UniversalWinner/DecisionMesh",
+  "bugs": {
+    "url": "https://github.com/UniversalWinner/DecisionMesh/issues"
+  },
+  "keywords": [
+    "ai",
+    "agents",
+    "decision",
+    "json-schema",
+    "approvals"
+  ],
+  "publishConfig": {
+    "registry": "https://registry.npmjs.org/",
+    "access": "public",
+    "tag": "bootstrap"
+  }
+}

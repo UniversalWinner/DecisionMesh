@@ -1,0 +1,11 @@
+{
+  "session_id": "synthetic-session",
+  "turn_id": "synthetic-turn",
+  "cwd": "C:/SyntheticProject",
+  "hook_event_name": "PermissionRequest",
+  "tool_name": "Bash",
+  "tool_input": {
+    "command": "echo synthetic probe",
+    "description": "Harmless synthetic fixture"
+  }
+}

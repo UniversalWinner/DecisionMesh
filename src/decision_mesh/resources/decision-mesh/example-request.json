@@ -1,0 +1,25 @@
+{
+  "source_request_id": "example-task-output-format",
+  "idempotency_key": "example-task-output-format-open-1",
+  "snapshot": {
+    "kind": "question",
+    "gate_kind": "user_authority",
+    "action_category": "general",
+    "title": "Choose the report format",
+    "summary": "Should this report be delivered as Markdown or PDF?",
+    "task": "Prepare the requested report",
+    "action": "Export the completed report",
+    "scope": "Only the requested report",
+    "reason": "The preferred delivery format is not specified",
+    "options": [
+      "Markdown",
+      "PDF"
+    ],
+    "provenance": [
+      {
+        "field": "summary",
+        "asserted_by": "agent"
+      }
+    ]
+  }
+}

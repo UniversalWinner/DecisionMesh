@@ -1,0 +1,114 @@
+name: Windows CI
+
+"on":
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  windows:
+    name: Windows / Python ${{ matrix.python-version }}
+    runs-on: windows-2022
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.13"]
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      PIP_DISABLE_PIP_VERSION_CHECK: "1"
+      PYTHONUTF8: "1"
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ matrix.python-version }}
+          architecture: x64
+
+      - name: Set up Node for npm tests
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22"
+          package-manager-cache: false
+
+      - name: Install test and build dependencies
+        run: python -m pip install -e ".[dev]" build playwright
+
+      - name: Install Chromium for browser tests
+        run: python -m playwright install chromium
+
+      - name: Check configured Ruff rules
+        run: python -m ruff check src tests tools/release
+
+      - name: Build wheel and source distribution
+        run: python -m build --outdir dist/candidate
+
+      - name: Inspect distributions and select exact test wheel
+        shell: python {0}
+        run: |
+          import os
+          from pathlib import Path
+          import subprocess
+          import sys
+
+          candidate = Path("dist/candidate").resolve()
+          wheels = sorted(candidate.glob("*.whl"))
+          sources = sorted(candidate.glob("*.tar.gz"))
+          if len(wheels) != 1 or len(sources) != 1:
+              raise SystemExit("Expected exactly one fresh wheel and source distribution")
+          for artifact, label in ((wheels[0], "wheel"), (sources[0], "source")):
+              subprocess.run([
+                  sys.executable, "tools/release/check_python_distribution.py",
+                  str(artifact), "--report", str(candidate / f"{label}-check.json"),
+              ], check=True)
+          with Path(os.environ["GITHUB_ENV"]).open("a", encoding="utf-8") as stream:
+              stream.write(f"DECISIONMESH_TEST_WHEEL={wheels[0]}\n")
+
+      - name: Run full suite including installed-command, Node and browser checks
+        run: python -m pytest -ra --junitxml=dist/ci/pytest.xml
+
+      - name: Require all qualification tests to run
+        shell: python {0}
+        run: |
+          import xml.etree.ElementTree as ET
+
+          report = ET.parse("dist/ci/pytest.xml")
+          skipped = report.findall(".//testcase/skipped")
+          if skipped:
+              raise SystemExit(f"{len(skipped)} tests skipped; inspect pytest -ra output")
+          print("No qualification tests skipped")
+
+      - name: Check npm bootstrap package
+        if: matrix.python-version == '3.12'
+        run: python tools/release/check_npm_bootstrap.py
+
+      - name: Smoke-test wheel in a fresh virtual environment
+        if: matrix.python-version == '3.12'
+        shell: python {0}
+        run: |
+          import os
+          from pathlib import Path
+          import subprocess
+          import sys
+
+          subprocess.run([
+              sys.executable, "tools/release/check_python_distribution.py",
+              os.environ["DECISIONMESH_TEST_WHEEL"],
+              "--install-work", str(Path(os.environ["RUNNER_TEMP"]) / "decisionmesh-wheel-smoke"),
+              "--report", "dist/ci/install-check.json",
+          ], check=True)

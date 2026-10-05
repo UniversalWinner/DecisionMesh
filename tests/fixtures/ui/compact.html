@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Inbox · Decision Mesh</title>
+<link rel="stylesheet" href="/static/app.css">
+<script src="/static/app.js" defer></script></head>
+<body><a class="skip-link" href="#main">Skip to main content</a>
+<header class="site-header"><a class="brand" href="/inbox">Decision Mesh</a><span>Local inbox</span>
+<nav aria-label="Main"><a href="/inbox">Inbox</a><a href="/settings">Settings</a>
+<form action="/auth/signout" method="post"><input type="hidden" name="csrf" value="REDACTED_SYNTHETIC_CSRF"><button>Sign out all sessions</button></form></nav></header>
+<main id="main" tabindex="-1">
+<div class="page-heading"><div><p class="eyebrow">Evidence, kept separate</p><h1>Inbox</h1></div><a href="/settings">Compact layout · Change</a></div>
+<form class="reference-search" action="/inbox" method="get"><label for="reference-search">Find reference in all history</label><input id="reference-search" name="short_reference" maxlength="8" pattern="[A-HJ-NP-Za-hj-np-z2-9]{8}" placeholder="ABCDEFGH" required autocomplete="off"><button>Find reference</button></form>
+<nav class="filters" aria-label="Inbox filters"><a href="/inbox?filter=attention" aria-current="page">Needs attention <span class="count">1</span></a><a href="/inbox?filter=unverified" >Status unverified <span class="count">0</span></a><a href="/inbox?filter=history" >History <span class="count">0</span></a></nav>
+
+
+
+<section class="record-list compact" aria-label="Request records">
+<article class="compact-row" aria-labelledby="title-ABCDEFGH">
+<div class="record-heading"><h2 id="title-ABCDEFGH"><a href="/records/ABCDEFGH">ABCDEFGH</a></h2><span>Question · Project 1</span></div>
+<p class="status">Agent-reported question (not verified)</p>
+
+<p class="short-action">Select an option</p>
+<p class="observed">Observed <time datetime="2026-10-04T09:55:00+00:00">2026-10-04T09:55:00+00:00</time> · age 5m</p>
+
+<div class="badges" aria-label="Independent record metadata"><span>Connection: unknown</span><span>Delivery: Not recorded</span></div>
+<a class="detail-link" href="/records/ABCDEFGH">Details and inbox actions for ABCDEFGH</a></article></section>
+<p class="muted">Counts cover all retained records. This page contains 1 records.</p>
+</main>
+<footer>Answer in the original chat. Inbox actions never answer a request or resume work.</footer>
+</body></html>

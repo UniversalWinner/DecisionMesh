@@ -1,0 +1,4 @@
+[
+  {"record_id":"record-a","short_reference":"ABCD2345","request_type":"permission","status":"prompt_observed","captured_at":"2026-10-04T10:00:00Z","age_seconds":30,"action":"This must stay private by default"},
+  {"record_id":"record-b","short_reference":"EFGH6789","request_type":"question","status":"last_known_pending","captured_at":"2026-10-04T09:58:00Z","age_seconds":120,"last_confirmed_at":"2026-10-04T09:59:00Z"}
+]

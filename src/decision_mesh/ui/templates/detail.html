@@ -1,0 +1,40 @@
+{% extends 'base.html' %}
+{% block title %}{{ record.short_reference }} · Decision Mesh{% endblock %}
+{% block content %}<a href="/inbox">← Back to inbox</a>
+{% if rendered %}{{ rendered }}{% else %}<h1>{{ record.short_reference }}</h1><h2>{{ record.detail_label if record.detail_available else 'Request details unavailable' }}</h2><p>{{ record.evidence_label }}</p><p>Observed: {{ record.captured_at.isoformat() if record.captured_at else 'Unavailable' }}{% if record.age_seconds is not none %} · age {{ record.age_seconds // 60 }}m{% endif %}</p><label>Copy chat reference <input class="chat-reference" value="{{ record.short_reference }}" readonly></label>{% endif %}
+{% if record.local_details %}<section aria-labelledby="local-details-title"><h2 id="local-details-title">{{ record.local_details.title }}</h2><dl class="metadata"><dt>Summary</dt><dd>{{ record.local_details.summary }}</dd>{% if record.local_details.task %}<dt>Task context</dt><dd>{{ record.local_details.task }}</dd>{% endif %}{% if record.local_details.options %}<dt>Source options (answer in the original chat)</dt><dd><ul>{% for option in record.local_details.options %}<li>{{ option }}</li>{% endfor %}</ul></dd>{% endif %}{% if record.local_details.exclusions %}<dt>Exclusions</dt><dd>{{ record.local_details.exclusions }}</dd>{% endif %}</dl></section>{% endif %}
+{% if record.local_details %}
+{% set claims = record.local_details %}
+<section aria-labelledby="source-claims-title">
+<h2 id="source-claims-title">Source-reported request details</h2>
+<p>Gate and action labels are supplied by the source. They do not establish permission or a verified review result.</p>
+<dl class="metadata">
+<dt>Gate category (reported)</dt><dd>{{ claims.gate_kind.value|replace('_', ' ')|capitalize }}</dd>
+<dt>Action category (reported)</dt><dd>{{ claims.action_category.value|capitalize }}</dd>
+<dt>Source-supplied expiry</dt><dd>{{ claims.source_expiry.isoformat() if claims.source_expiry else 'Not supplied' }}</dd>
+</dl>
+<p>A supplied timestamp does not establish current source expiry.</p>
+<h3>Authority reference (source/agent claim)</h3>
+{% if claims.authority_reference %}
+{% set authority = claims.authority_reference %}
+<p>This reference is a source/agent claim, not an approval or executable policy. The assertion origin is a supplied label, not a verified identity.</p>
+<dl class="metadata">
+<dt>Assertion origin (supplied)</dt><dd>{{ authority.asserted_by|capitalize }}</dd>
+<dt>Source pointer</dt><dd>{{ authority.source_pointer or 'Not supplied' }}</dd>
+<dt>Quoted source text</dt><dd>{{ authority.quote or 'Not supplied' }}</dd>
+<dt>Claimed scope</dt><dd>{{ authority.scope or 'Not supplied' }}</dd>
+<dt>Claimed exclusions</dt><dd>{{ authority.exclusions or 'Not supplied' }}</dd>
+<dt>Supplied lifetime</dt><dd>{{ authority.supplied_lifetime or 'Not supplied' }}</dd>
+</dl>
+{% else %}<p>Authority reference not supplied.</p>{% endif %}
+</section>
+{% endif %}
+<section aria-labelledby="evidence-title"><h2 id="evidence-title">Independent evidence</h2><dl class="metadata"><dt>Source state</dt><dd>{{ record.source_state }}</dd><dt>Evidence class</dt><dd>{{ record.evidence_class }}</dd><dt>Execution evidence</dt><dd>{{ record.execution_state }} — no execution outcome is inferred from an answer.</dd><dt>Connection</dt><dd>{{ record.connection_state }}</dd><dt>Delivery</dt><dd>{{ record.delivery_state or 'Not recorded' }} — API acceptance does not establish device delivery or reading.</dd><dt>Seen</dt><dd>{{ 'Yes' if record.seen else 'No' }}</dd><dt>Snooze</dt><dd>{{ record.snoozed_until.isoformat() if record.snoozed_until else 'Not snoozed' }}</dd><dt>Suppression</dt><dd>{{ 'Notifications suppressed' if record.suppressed else 'Not suppressed' }}</dd></dl></section>
+<section class="actions" aria-labelledby="actions-title"><h2 id="actions-title">Inbox actions</h2><form method="post" action="/records/{{ record.short_reference }}/seen"><input type="hidden" name="csrf" value="{{ csrf }}"><button>Mark as seen (does not answer the agent)</button></form>
+<h3>Snooze notifications</h3><p>Snooze hides this record from Needs attention and suppresses sends until the deadline. It never extends source expiry or resumes work.</p>
+{% set aging = record.aging_deadline|default(none) %}{% if aging %}<p class="notice">Observation aging time: <time datetime="{{ aging.isoformat() }}">{{ aging.isoformat() }}</time>. A snooze ending at or after that time means <strong>Hide (no reminder)</strong>.</p>{% endif %}
+<div class="inline-actions">{% for minutes,label in [(10,'10 minutes'),(60,'1 hour')] %}<form method="post" action="/records/{{ record.short_reference }}/snooze"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="duration" value="{{ minutes }}"><button>{{ 'Hide (no reminder)' if aging and now + timedelta(minutes=minutes) >= aging else 'Snooze' }} · {{ label }}</button></form>{% endfor %}</div>
+<form method="post" action="/records/{{ record.short_reference }}/snooze" class="custom-snooze" data-aging="{{ aging.isoformat() if aging else '' }}"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="duration" value="custom"><label for="until">Custom future time with timezone (ISO 8601)</label><input id="until" name="until" placeholder="2026-10-05T14:00:00+05:30" required aria-describedby="custom-hint"><p id="custom-hint">Include Z or a timezone offset. {% if aging %}At or after the aging time: Hide (no reminder).{% endif %}</p><button>Snooze until custom time</button><span class="snooze-hint" role="status"></span></form>
+<h3>Suppress notifications</h3><p>Suppression prevents future sends for this record until you remove it. It is separate from Seen and Snooze and does not answer or close the source request.</p><form method="post" action="/records/{{ record.short_reference }}/suppress"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="suppressed" value="{{ 'false' if record.suppressed else 'true' }}"><button>{{ 'Remove notification suppression' if record.suppressed else 'Suppress notifications for this record' }}</button></form></section>
+{% if include_current_available %}<section aria-labelledby="include-title"><h2 id="include-title">Include this current record</h2><p>Reactivation never forwards an older backlog automatically. This explicitly asks the delivery worker to include this record only if its current evidence and disclosure permit it.</p><form method="post" action="/records/{{ record.short_reference }}/include-current"><input type="hidden" name="csrf" value="{{ csrf }}"><label class="check"><input type="checkbox" name="confirm" required> Include this record under current delivery settings</label><button>Include current record</button></form></section>{% endif %}
+{% endblock %}

@@ -1,0 +1,13 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>{% block title %}Decision Mesh{% endblock %}</title>
+<link rel="stylesheet" href="{{ url_for('static', filename='app.css') }}">
+<script src="{{ url_for('static', filename='app.js') }}" defer></script></head>
+<body><a class="skip-link" href="#main">Skip to main content</a>
+<header class="site-header"><a class="brand" href="/inbox">Decision Mesh</a><span>Local inbox</span>
+{% if authenticated %}<nav aria-label="Main"><a href="/inbox">Inbox</a><a href="/settings">Settings</a>
+<form action="/auth/signout" method="post"><input type="hidden" name="csrf" value="{{ csrf }}"><button>Sign out all sessions</button></form></nav>{% endif %}</header>
+<main id="main" tabindex="-1">{% block content %}{% endblock %}</main>
+<footer>Answer in the original chat. Inbox actions never answer a request or resume work.</footer>
+</body></html>

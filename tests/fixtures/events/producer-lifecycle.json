@@ -1,0 +1,92 @@
+{
+  "synthetic": true,
+  "events": [
+    {
+      "schema_version": 1,
+      "producer_id": "agent-local",
+      "event_id": "opened-1",
+      "event_kind": "request.opened",
+      "source_request_id": "fixture-question",
+      "revision": 1,
+      "captured_at": "2026-10-04T10:00:00Z",
+      "source_context": {
+        "producer_kind": "explicit"
+      },
+      "evidence_class": "producer_reported",
+      "payload": {
+        "snapshot": {
+          "kind": "question",
+          "title": "Choose fixture target",
+          "summary": "A or B?"
+        }
+      }
+    },
+    {
+      "schema_version": 1,
+      "producer_id": "agent-local",
+      "event_id": "opened-1",
+      "event_kind": "request.opened",
+      "source_request_id": "fixture-question",
+      "revision": 1,
+      "captured_at": "2026-10-04T10:00:00Z",
+      "source_context": {
+        "producer_kind": "explicit"
+      },
+      "evidence_class": "producer_reported",
+      "payload": {
+        "snapshot": {
+          "kind": "question",
+          "title": "Choose fixture target",
+          "summary": "A or B?"
+        }
+      }
+    },
+    {
+      "schema_version": 1,
+      "producer_id": "agent-local",
+      "event_id": "resolved-2",
+      "event_kind": "request.resolved",
+      "source_request_id": "fixture-question",
+      "revision": 2,
+      "captured_at": "2026-10-04T10:00:00Z",
+      "source_context": {
+        "producer_kind": "explicit"
+      },
+      "evidence_class": "producer_reported",
+      "payload": {
+        "snapshot": {
+          "kind": "question",
+          "title": "Choose fixture target",
+          "summary": "A or B?"
+        },
+        "outcome": "resolved"
+      }
+    },
+    {
+      "schema_version": 1,
+      "producer_id": "agent-local",
+      "event_id": "updated-3",
+      "event_kind": "request.updated",
+      "source_request_id": "fixture-question",
+      "revision": 3,
+      "captured_at": "2026-10-04T10:00:00Z",
+      "source_context": {
+        "producer_kind": "explicit"
+      },
+      "evidence_class": "producer_reported",
+      "payload": {
+        "snapshot": {
+          "kind": "question",
+          "title": "Choose fixture target",
+          "summary": "A or B?"
+        }
+      }
+    }
+  ],
+  "expected_categories": [
+    "apply",
+    "duplicate",
+    "apply",
+    "conflict"
+  ]
+}

@@ -1,0 +1,228 @@
+{
+  "synthetic": true,
+  "request_id": "native:95935809c07da928defb317e79ff682af624c3e270a8c5583d524a6d6127d666",
+  "events": [
+    {
+      "schema_version": 1,
+      "producer_id": "codex-native",
+      "event_id": "native-open-1",
+      "event_kind": "request.opened",
+      "source_request_id": "native:95935809c07da928defb317e79ff682af624c3e270a8c5583d524a6d6127d666",
+      "revision": 1,
+      "captured_at": "2026-10-04T10:00:00Z",
+      "source_context": {
+        "producer_kind": "native",
+        "host": "codex",
+        "surface": "synthetic",
+        "thread_id": "fixture-thread-1"
+      },
+      "evidence_class": "source_authoritative",
+      "payload": {
+        "snapshot": {
+          "kind": "permission",
+          "gate_kind": "platform_permission",
+          "title": "Synthetic native decision",
+          "native_reference": {
+            "native_request_id": "fixture-native-1",
+            "thread_id": "fixture-thread-1"
+          },
+          "provenance": [
+            {
+              "field": "native_reference",
+              "asserted_by": "host",
+              "source_pointer": "synthetic fixture only"
+            }
+          ]
+        },
+        "authoritative_current": true,
+        "continuity_restored": true
+      }
+    },
+    {
+      "schema_version": 1,
+      "producer_id": "codex-native",
+      "event_id": "native-disconnect",
+      "event_kind": "source.health",
+      "captured_at": "2026-10-04T10:00:00Z",
+      "source_context": {
+        "producer_kind": "native",
+        "host": "codex",
+        "surface": "synthetic"
+      },
+      "evidence_class": "source_authoritative",
+      "payload": {
+        "connection_state": "disconnected"
+      }
+    },
+    {
+      "schema_version": 1,
+      "producer_id": "codex-native",
+      "event_id": "native-update-2",
+      "event_kind": "request.updated",
+      "source_request_id": "native:95935809c07da928defb317e79ff682af624c3e270a8c5583d524a6d6127d666",
+      "revision": 2,
+      "captured_at": "2026-10-04T10:00:00Z",
+      "source_context": {
+        "producer_kind": "native",
+        "host": "codex",
+        "surface": "synthetic",
+        "thread_id": "fixture-thread-1"
+      },
+      "evidence_class": "source_authoritative",
+      "payload": {
+        "snapshot": {
+          "kind": "permission",
+          "gate_kind": "platform_permission",
+          "title": "Synthetic native decision",
+          "native_reference": {
+            "native_request_id": "fixture-native-1",
+            "thread_id": "fixture-thread-1"
+          },
+          "provenance": [
+            {
+              "field": "native_reference",
+              "asserted_by": "host",
+              "source_pointer": "synthetic fixture only"
+            }
+          ]
+        },
+        "authoritative_current": false,
+        "continuity_restored": false
+      }
+    },
+    {
+      "schema_version": 1,
+      "producer_id": "codex-native",
+      "event_id": "native-reconcile-3",
+      "event_kind": "request.updated",
+      "source_request_id": "native:95935809c07da928defb317e79ff682af624c3e270a8c5583d524a6d6127d666",
+      "revision": 3,
+      "captured_at": "2026-10-04T10:01:00Z",
+      "source_context": {
+        "producer_kind": "native",
+        "host": "codex",
+        "surface": "synthetic",
+        "thread_id": "fixture-thread-1"
+      },
+      "evidence_class": "source_authoritative",
+      "payload": {
+        "snapshot": {
+          "kind": "permission",
+          "gate_kind": "platform_permission",
+          "title": "Synthetic native decision",
+          "native_reference": {
+            "native_request_id": "fixture-native-1",
+            "thread_id": "fixture-thread-1"
+          },
+          "provenance": [
+            {
+              "field": "native_reference",
+              "asserted_by": "host",
+              "source_pointer": "synthetic fixture only"
+            }
+          ]
+        },
+        "authoritative_current": true,
+        "continuity_restored": true
+      }
+    },
+    {
+      "schema_version": 1,
+      "producer_id": "codex-native",
+      "event_id": "native-closed-4",
+      "event_kind": "request.resolved",
+      "source_request_id": "native:95935809c07da928defb317e79ff682af624c3e270a8c5583d524a6d6127d666",
+      "revision": 4,
+      "captured_at": "2026-10-04T10:02:00Z",
+      "source_context": {
+        "producer_kind": "native",
+        "host": "codex",
+        "surface": "synthetic",
+        "thread_id": "fixture-thread-1"
+      },
+      "evidence_class": "source_authoritative",
+      "payload": {
+        "snapshot": {
+          "kind": "permission",
+          "gate_kind": "platform_permission",
+          "title": "Synthetic native decision",
+          "native_reference": {
+            "native_request_id": "fixture-native-1",
+            "thread_id": "fixture-thread-1"
+          },
+          "provenance": [
+            {
+              "field": "native_reference",
+              "asserted_by": "host",
+              "source_pointer": "synthetic fixture only"
+            }
+          ]
+        },
+        "authoritative_current": false,
+        "continuity_restored": false,
+        "outcome": "closed_unknown"
+      }
+    },
+    {
+      "schema_version": 1,
+      "producer_id": "codex-native",
+      "event_id": "native-correct-5",
+      "event_kind": "request.corrected",
+      "source_request_id": "native:95935809c07da928defb317e79ff682af624c3e270a8c5583d524a6d6127d666",
+      "revision": 5,
+      "captured_at": "2026-10-04T10:03:00Z",
+      "source_context": {
+        "producer_kind": "native",
+        "host": "codex",
+        "surface": "synthetic",
+        "thread_id": "fixture-thread-1"
+      },
+      "evidence_class": "source_authoritative",
+      "payload": {
+        "snapshot": {
+          "kind": "permission",
+          "gate_kind": "platform_permission",
+          "title": "Synthetic native decision",
+          "native_reference": {
+            "native_request_id": "fixture-native-1",
+            "thread_id": "fixture-thread-1"
+          },
+          "provenance": [
+            {
+              "field": "native_reference",
+              "asserted_by": "host",
+              "source_pointer": "synthetic fixture only"
+            }
+          ]
+        },
+        "authoritative_current": false,
+        "continuity_restored": false,
+        "outcome": "answered"
+      }
+    }
+  ],
+  "expected_categories": [
+    "apply",
+    "apply",
+    "apply",
+    "apply",
+    "apply",
+    "apply"
+  ],
+  "expected_states": [
+    "pending",
+    "pending",
+    "pending",
+    "pending",
+    "closed_unknown",
+    "answered"
+  ],
+  "expected_confirmation": [
+    true,
+    false,
+    false,
+    true,
+    false,
+    false
+  ]
+}

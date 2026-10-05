@@ -1,0 +1,4 @@
+{% extends 'base.html' %}
+{% block content %}<h1>Review external disclosure</h1><p>This synthetic example shows the exact selected fields and layout. No message has been sent. Actual records include their captured values; missing fields stay absent.</p>
+{% for preview in previews %}<pre class="preview">{{ preview }}</pre>{% endfor %}
+<form method="post" action="/settings"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="expected_revision" value="{{ data.expected_revision }}"><input type="hidden" name="changes" value="{{ changes_json }}"><input type="hidden" name="preview_receipt" value="{{ receipt }}"><button>Confirm preview and save settings</button></form><a href="/settings">Cancel and return to settings</a>{% endblock %}

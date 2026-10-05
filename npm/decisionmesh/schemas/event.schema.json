@@ -1,0 +1,1179 @@
+{
+  "$defs": {
+    "ActionCategory": {
+      "enum": [
+        "testing",
+        "implementation",
+        "download",
+        "installation",
+        "general",
+        "unknown"
+      ],
+      "title": "ActionCategory",
+      "type": "string"
+    },
+    "AuthorityReference": {
+      "additionalProperties": false,
+      "properties": {
+        "asserted_by": {
+          "enum": [
+            "host",
+            "agent",
+            "user"
+          ],
+          "title": "Asserted By",
+          "type": "string"
+        },
+        "exclusions": {
+          "anyOf": [
+            {
+              "maxLength": 2048,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Exclusions"
+        },
+        "quote": {
+          "anyOf": [
+            {
+              "maxLength": 4096,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Quote"
+        },
+        "scope": {
+          "anyOf": [
+            {
+              "maxLength": 2048,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Scope"
+        },
+        "source_pointer": {
+          "anyOf": [
+            {
+              "maxLength": 2048,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Source Pointer"
+        },
+        "supplied_lifetime": {
+          "anyOf": [
+            {
+              "maxLength": 2048,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Supplied Lifetime"
+        }
+      },
+      "required": [
+        "asserted_by"
+      ],
+      "title": "AuthorityReference",
+      "type": "object"
+    },
+    "ConnectionState": {
+      "enum": [
+        "unknown",
+        "continuous",
+        "disconnected",
+        "gapped"
+      ],
+      "title": "ConnectionState",
+      "type": "string"
+    },
+    "DecisionKind": {
+      "enum": [
+        "permission",
+        "question",
+        "choice"
+      ],
+      "title": "DecisionKind",
+      "type": "string"
+    },
+    "DecisionSnapshot": {
+      "additionalProperties": false,
+      "properties": {
+        "action": {
+          "anyOf": [
+            {
+              "maxLength": 2048,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Action"
+        },
+        "action_category": {
+          "$ref": "#/$defs/ActionCategory",
+          "default": "unknown"
+        },
+        "authority_reference": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AuthorityReference"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "exclusions": {
+          "anyOf": [
+            {
+              "maxLength": 2048,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Exclusions"
+        },
+        "gate_kind": {
+          "$ref": "#/$defs/GateKind",
+          "default": "unclassified"
+        },
+        "kind": {
+          "$ref": "#/$defs/DecisionKind"
+        },
+        "native_reference": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NativeReference"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "options": {
+          "default": [],
+          "items": {
+            "maxLength": 160,
+            "type": "string"
+          },
+          "maxItems": 32,
+          "title": "Options",
+          "type": "array"
+        },
+        "provenance": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/Provenance"
+          },
+          "maxItems": 16,
+          "title": "Provenance",
+          "type": "array"
+        },
+        "reason": {
+          "anyOf": [
+            {
+              "maxLength": 4096,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Reason"
+        },
+        "scope": {
+          "anyOf": [
+            {
+              "maxLength": 2048,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Scope"
+        },
+        "source_expiry": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Source Expiry"
+        },
+        "summary": {
+          "default": "",
+          "maxLength": 2048,
+          "title": "Summary",
+          "type": "string"
+        },
+        "task": {
+          "anyOf": [
+            {
+              "maxLength": 2048,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Task"
+        },
+        "title": {
+          "default": "",
+          "maxLength": 160,
+          "title": "Title",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind"
+      ],
+      "title": "DecisionSnapshot",
+      "type": "object"
+    },
+    "EvidenceClass": {
+      "enum": [
+        "gate_observed",
+        "prompt_confirmed",
+        "source_authoritative",
+        "producer_reported"
+      ],
+      "title": "EvidenceClass",
+      "type": "string"
+    },
+    "ExecutionEvent": {
+      "additionalProperties": false,
+      "properties": {
+        "capture_policy_ref": {
+          "anyOf": [
+            {
+              "maxLength": 128,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Capture Policy Ref"
+        },
+        "captured_at": {
+          "format": "date-time",
+          "title": "Captured At",
+          "type": "string"
+        },
+        "event_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Event Id",
+          "type": "string"
+        },
+        "event_kind": {
+          "const": "execution.updated",
+          "title": "Event Kind",
+          "type": "string"
+        },
+        "evidence_class": {
+          "$ref": "#/$defs/EvidenceClass"
+        },
+        "occurred_at": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Occurred At"
+        },
+        "payload": {
+          "$ref": "#/$defs/ExecutionPayload"
+        },
+        "producer_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Producer Id",
+          "type": "string"
+        },
+        "revision": {
+          "exclusiveMinimum": 0,
+          "maximum": 9223372036854775807,
+          "title": "Revision",
+          "type": "integer"
+        },
+        "schema_version": {
+          "const": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "source_context": {
+          "$ref": "#/$defs/SourceContext"
+        },
+        "source_request_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Source Request Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "schema_version",
+        "producer_id",
+        "event_id",
+        "captured_at",
+        "source_context",
+        "evidence_class",
+        "event_kind",
+        "source_request_id",
+        "revision",
+        "payload"
+      ],
+      "title": "ExecutionEvent",
+      "type": "object"
+    },
+    "ExecutionPayload": {
+      "additionalProperties": false,
+      "properties": {
+        "execution_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Execution Id",
+          "type": "string"
+        },
+        "execution_state": {
+          "enum": [
+            "running",
+            "succeeded",
+            "failed"
+          ],
+          "title": "Execution State",
+          "type": "string"
+        },
+        "mapping": {
+          "enum": [
+            "one_to_one",
+            "grouped",
+            "unknown"
+          ],
+          "title": "Mapping",
+          "type": "string"
+        },
+        "native_reference": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NativeReference"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "execution_id",
+        "execution_state",
+        "mapping"
+      ],
+      "title": "ExecutionPayload",
+      "type": "object"
+    },
+    "GateKind": {
+      "enum": [
+        "user_authority",
+        "technical_review",
+        "platform_permission",
+        "runtime_admission",
+        "unclassified"
+      ],
+      "title": "GateKind",
+      "type": "string"
+    },
+    "HealthEvent": {
+      "additionalProperties": false,
+      "properties": {
+        "capture_policy_ref": {
+          "anyOf": [
+            {
+              "maxLength": 128,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Capture Policy Ref"
+        },
+        "captured_at": {
+          "format": "date-time",
+          "title": "Captured At",
+          "type": "string"
+        },
+        "event_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Event Id",
+          "type": "string"
+        },
+        "event_kind": {
+          "const": "source.health",
+          "title": "Event Kind",
+          "type": "string"
+        },
+        "evidence_class": {
+          "$ref": "#/$defs/EvidenceClass"
+        },
+        "occurred_at": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Occurred At"
+        },
+        "payload": {
+          "$ref": "#/$defs/HealthPayload"
+        },
+        "producer_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Producer Id",
+          "type": "string"
+        },
+        "revision": {
+          "default": null,
+          "title": "Revision",
+          "type": "null"
+        },
+        "schema_version": {
+          "const": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "source_context": {
+          "$ref": "#/$defs/SourceContext"
+        },
+        "source_request_id": {
+          "default": null,
+          "title": "Source Request Id",
+          "type": "null"
+        }
+      },
+      "required": [
+        "schema_version",
+        "producer_id",
+        "event_id",
+        "captured_at",
+        "source_context",
+        "evidence_class",
+        "event_kind",
+        "payload"
+      ],
+      "title": "HealthEvent",
+      "type": "object"
+    },
+    "HealthPayload": {
+      "additionalProperties": false,
+      "properties": {
+        "connection_state": {
+          "$ref": "#/$defs/ConnectionState"
+        },
+        "reconciled": {
+          "default": false,
+          "title": "Reconciled",
+          "type": "boolean"
+        },
+        "session_ended": {
+          "default": false,
+          "title": "Session Ended",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "connection_state"
+      ],
+      "title": "HealthPayload",
+      "type": "object"
+    },
+    "NativeReference": {
+      "additionalProperties": false,
+      "properties": {
+        "native_request_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Native Request Id",
+          "type": "string"
+        },
+        "session_id": {
+          "anyOf": [
+            {
+              "maxLength": 128,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Session Id"
+        },
+        "source_instance_id": {
+          "anyOf": [
+            {
+              "maxLength": 128,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Source Instance Id"
+        },
+        "thread_id": {
+          "anyOf": [
+            {
+              "maxLength": 128,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Thread Id"
+        }
+      },
+      "required": [
+        "native_request_id"
+      ],
+      "title": "NativeReference",
+      "type": "object"
+    },
+    "ObservationEvent": {
+      "additionalProperties": false,
+      "properties": {
+        "capture_policy_ref": {
+          "anyOf": [
+            {
+              "maxLength": 128,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Capture Policy Ref"
+        },
+        "captured_at": {
+          "format": "date-time",
+          "title": "Captured At",
+          "type": "string"
+        },
+        "event_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Event Id",
+          "type": "string"
+        },
+        "event_kind": {
+          "const": "observation.recorded",
+          "title": "Event Kind",
+          "type": "string"
+        },
+        "evidence_class": {
+          "$ref": "#/$defs/EvidenceClass"
+        },
+        "occurred_at": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Occurred At"
+        },
+        "payload": {
+          "$ref": "#/$defs/SnapshotPayload"
+        },
+        "producer_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Producer Id",
+          "type": "string"
+        },
+        "revision": {
+          "default": null,
+          "title": "Revision",
+          "type": "null"
+        },
+        "schema_version": {
+          "const": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "source_context": {
+          "$ref": "#/$defs/SourceContext"
+        },
+        "source_request_id": {
+          "default": null,
+          "title": "Source Request Id",
+          "type": "null"
+        }
+      },
+      "required": [
+        "schema_version",
+        "producer_id",
+        "event_id",
+        "captured_at",
+        "source_context",
+        "evidence_class",
+        "event_kind",
+        "payload"
+      ],
+      "title": "ObservationEvent",
+      "type": "object"
+    },
+    "Provenance": {
+      "additionalProperties": false,
+      "properties": {
+        "asserted_by": {
+          "enum": [
+            "host",
+            "agent",
+            "user"
+          ],
+          "title": "Asserted By",
+          "type": "string"
+        },
+        "field": {
+          "enum": [
+            "kind",
+            "gate_kind",
+            "action_category",
+            "title",
+            "summary",
+            "task",
+            "action",
+            "scope",
+            "exclusions",
+            "reason",
+            "options",
+            "source_expiry",
+            "native_reference",
+            "authority_reference"
+          ],
+          "title": "Field",
+          "type": "string"
+        },
+        "source_pointer": {
+          "anyOf": [
+            {
+              "maxLength": 2048,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Source Pointer"
+        }
+      },
+      "required": [
+        "field",
+        "asserted_by"
+      ],
+      "title": "Provenance",
+      "type": "object"
+    },
+    "RequestEvent": {
+      "additionalProperties": false,
+      "properties": {
+        "capture_policy_ref": {
+          "anyOf": [
+            {
+              "maxLength": 128,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Capture Policy Ref"
+        },
+        "captured_at": {
+          "format": "date-time",
+          "title": "Captured At",
+          "type": "string"
+        },
+        "event_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Event Id",
+          "type": "string"
+        },
+        "event_kind": {
+          "enum": [
+            "request.opened",
+            "request.updated"
+          ],
+          "title": "Event Kind",
+          "type": "string"
+        },
+        "evidence_class": {
+          "$ref": "#/$defs/EvidenceClass"
+        },
+        "occurred_at": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Occurred At"
+        },
+        "payload": {
+          "$ref": "#/$defs/SnapshotPayload"
+        },
+        "producer_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Producer Id",
+          "type": "string"
+        },
+        "revision": {
+          "exclusiveMinimum": 0,
+          "maximum": 9223372036854775807,
+          "title": "Revision",
+          "type": "integer"
+        },
+        "schema_version": {
+          "const": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "source_context": {
+          "$ref": "#/$defs/SourceContext"
+        },
+        "source_request_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Source Request Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "schema_version",
+        "producer_id",
+        "event_id",
+        "captured_at",
+        "source_context",
+        "evidence_class",
+        "event_kind",
+        "source_request_id",
+        "revision",
+        "payload"
+      ],
+      "title": "RequestEvent",
+      "type": "object"
+    },
+    "SnapshotPayload": {
+      "additionalProperties": false,
+      "properties": {
+        "authoritative_current": {
+          "default": false,
+          "title": "Authoritative Current",
+          "type": "boolean"
+        },
+        "continuity_restored": {
+          "default": false,
+          "title": "Continuity Restored",
+          "type": "boolean"
+        },
+        "snapshot": {
+          "$ref": "#/$defs/DecisionSnapshot"
+        }
+      },
+      "required": [
+        "snapshot"
+      ],
+      "title": "SnapshotPayload",
+      "type": "object"
+    },
+    "SourceContext": {
+      "additionalProperties": false,
+      "properties": {
+        "connection_epoch": {
+          "anyOf": [
+            {
+              "maxLength": 128,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Connection Epoch"
+        },
+        "host": {
+          "anyOf": [
+            {
+              "maxLength": 128,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Host"
+        },
+        "producer_kind": {
+          "enum": [
+            "native",
+            "explicit"
+          ],
+          "title": "Producer Kind",
+          "type": "string"
+        },
+        "session_id": {
+          "anyOf": [
+            {
+              "maxLength": 128,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Session Id"
+        },
+        "source_instance_id": {
+          "anyOf": [
+            {
+              "maxLength": 128,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Source Instance Id"
+        },
+        "surface": {
+          "anyOf": [
+            {
+              "maxLength": 128,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Surface"
+        },
+        "thread_id": {
+          "anyOf": [
+            {
+              "maxLength": 128,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Thread Id"
+        },
+        "turn_id": {
+          "anyOf": [
+            {
+              "maxLength": 128,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Turn Id"
+        },
+        "version": {
+          "anyOf": [
+            {
+              "maxLength": 128,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Version"
+        }
+      },
+      "required": [
+        "producer_kind"
+      ],
+      "title": "SourceContext",
+      "type": "object"
+    },
+    "TerminalEvent": {
+      "additionalProperties": false,
+      "properties": {
+        "capture_policy_ref": {
+          "anyOf": [
+            {
+              "maxLength": 128,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Capture Policy Ref"
+        },
+        "captured_at": {
+          "format": "date-time",
+          "title": "Captured At",
+          "type": "string"
+        },
+        "event_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Event Id",
+          "type": "string"
+        },
+        "event_kind": {
+          "enum": [
+            "request.resolved",
+            "request.withdrawn",
+            "request.corrected"
+          ],
+          "title": "Event Kind",
+          "type": "string"
+        },
+        "evidence_class": {
+          "$ref": "#/$defs/EvidenceClass"
+        },
+        "occurred_at": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Occurred At"
+        },
+        "payload": {
+          "$ref": "#/$defs/TerminalPayload"
+        },
+        "producer_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Producer Id",
+          "type": "string"
+        },
+        "revision": {
+          "exclusiveMinimum": 0,
+          "maximum": 9223372036854775807,
+          "title": "Revision",
+          "type": "integer"
+        },
+        "schema_version": {
+          "const": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "source_context": {
+          "$ref": "#/$defs/SourceContext"
+        },
+        "source_request_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Source Request Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "schema_version",
+        "producer_id",
+        "event_id",
+        "captured_at",
+        "source_context",
+        "evidence_class",
+        "event_kind",
+        "source_request_id",
+        "revision",
+        "payload"
+      ],
+      "title": "TerminalEvent",
+      "type": "object"
+    },
+    "TerminalPayload": {
+      "additionalProperties": false,
+      "properties": {
+        "authoritative_current": {
+          "default": false,
+          "title": "Authoritative Current",
+          "type": "boolean"
+        },
+        "continuity_restored": {
+          "default": false,
+          "title": "Continuity Restored",
+          "type": "boolean"
+        },
+        "outcome": {
+          "enum": [
+            "answered",
+            "declined",
+            "cancelled",
+            "closed_unknown",
+            "expired",
+            "withdrawn",
+            "replaced",
+            "resolved"
+          ],
+          "title": "Outcome",
+          "type": "string"
+        },
+        "replacement_request_id": {
+          "anyOf": [
+            {
+              "maxLength": 128,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Replacement Request Id"
+        },
+        "snapshot": {
+          "$ref": "#/$defs/DecisionSnapshot"
+        }
+      },
+      "required": [
+        "snapshot",
+        "outcome"
+      ],
+      "title": "TerminalPayload",
+      "type": "object"
+    }
+  },
+  "$id": "urn:decisionmesh:event-envelope:v1",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "discriminator": {
+    "mapping": {
+      "execution.updated": "#/$defs/ExecutionEvent",
+      "observation.recorded": "#/$defs/ObservationEvent",
+      "request.corrected": "#/$defs/TerminalEvent",
+      "request.opened": "#/$defs/RequestEvent",
+      "request.resolved": "#/$defs/TerminalEvent",
+      "request.updated": "#/$defs/RequestEvent",
+      "request.withdrawn": "#/$defs/TerminalEvent",
+      "source.health": "#/$defs/HealthEvent"
+    },
+    "propertyName": "event_kind"
+  },
+  "oneOf": [
+    {
+      "$ref": "#/$defs/ObservationEvent"
+    },
+    {
+      "$ref": "#/$defs/RequestEvent"
+    },
+    {
+      "$ref": "#/$defs/TerminalEvent"
+    },
+    {
+      "$ref": "#/$defs/ExecutionEvent"
+    },
+    {
+      "$ref": "#/$defs/HealthEvent"
+    }
+  ]
+}

@@ -1,0 +1,21 @@
+{% extends 'base.html' %}
+{% block title %}Inbox · Decision Mesh{% endblock %}
+{% block content %}
+<div class="page-heading"><div><p class="eyebrow">Evidence, kept separate</p><h1>Inbox</h1></div><a href="/settings">{{ layout|title }} layout · Change</a></div>
+<form class="reference-search" action="/inbox" method="get"><label for="reference-search">Find reference in all history</label><input id="reference-search" name="short_reference" maxlength="8" pattern="[A-HJ-NP-Za-hj-np-z2-9]{8}" placeholder="ABCDEFGH" required autocomplete="off"><button>Find reference</button></form>
+<nav class="filters" aria-label="Inbox filters">{% for key,label in [('attention','Needs attention'),('confirmed','Source-confirmed pending'),('unverified','Status unverified'),('history','History')] %}{% if key != 'confirmed' or state.source_confirmed_supported %}<a href="/inbox?filter={{ key }}" {% if selected == key %}aria-current="page"{% endif %}>{{ label }} <span class="count">{{ state.counts|attr(key) }}</span></a>{% endif %}{% endfor %}</nav>
+{% if selected == 'attention' and state.counts.attention == 0 and state.counts.recent_aged %}<aside class="notice" role="status">{{ state.counts.recent_aged }} observations aged without a verified outcome; they may still be waiting in Codex. <a href="/inbox?filter=history">Review History</a></aside>{% endif %}
+{% if selected == 'confirmed' and not state.source_confirmed_supported %}<p class="notice">Current source-confirmed pending evidence is not supported by the configured source.</p>{% endif %}
+{% if not state.records %}<section class="empty"><h2>No records on this page</h2><p>An empty inbox does not establish that an agent is idle or unblocked. Check the original chat when needed.</p><a href="/inbox?filter=history">View History</a></section>{% endif %}
+<section class="record-list {{ layout }}" aria-label="Request records">{% for record in state.records %}
+<article class="{{ 'compact-row' if layout == 'compact' else 'friendly-card' }}" aria-labelledby="title-{{ record.short_reference }}">
+<div class="record-heading"><h2 id="title-{{ record.short_reference }}"><a href="/records/{{ record.short_reference }}">{{ record.short_reference }}</a></h2>{% if record.presentation %}<span>{{ record.presentation.request_type.value|title }} · {{ record.presentation.project_alias }}</span>{% else %}<span>Request details unavailable</span>{% endif %}</div>
+<p class="status">{{ record.evidence_label }}</p>
+{% if record.local_details %}<p class="local-title">{{ record.local_details.title }}</p>{% if layout == 'friendly' %}<p>{{ record.local_details.summary }}</p>{% endif %}{% endif %}
+{% if record.presentation %}{% if layout == 'friendly' %}<dl class="context-blocks">{% for label,value in [('Task',record.presentation.action),('Why',record.presentation.reason),('Scope',record.presentation.scope)] %}<div><dt>{{ label }}</dt><dd>{{ value or 'Not provided' }}</dd></div>{% endfor %}</dl>{% else %}<p class="short-action">{{ record.presentation.action or 'Task details not provided' }}</p>{% endif %}{% endif %}
+<p class="observed">Observed {% if record.captured_at %}<time datetime="{{ record.captured_at.isoformat() }}">{{ record.captured_at.isoformat() }}</time>{% else %}time unavailable{% endif %}{% if record.age_seconds is not none %} · age {{ record.age_seconds // 60 }}m{% endif %}</p>
+{% if record.last_confirmed_at %}<p>Last confirmed at {{ record.last_confirmed_at.isoformat() }}</p>{% endif %}
+<div class="badges" aria-label="Independent record metadata"><span>Connection: {{ record.connection_state }}</span>{% if record.seen %}<span>Seen</span>{% endif %}{% if record.snoozed_until %}<span>Snoozed until {{ record.snoozed_until.isoformat() }}</span>{% endif %}{% if record.suppressed %}<span>Notifications suppressed</span>{% endif %}<span>Delivery: {{ record.delivery_state or 'Not recorded' }}</span></div>
+<a class="detail-link" href="/records/{{ record.short_reference }}">Details and inbox actions for {{ record.short_reference }}</a></article>{% endfor %}</section>
+{% if state.next_cursor %}<a class="next-page" href="{{ url_for('inbox', filter=selected, cursor=state.next_cursor) }}">Next page</a>{% endif %}<p class="muted">Counts cover all retained records. This page contains {{ state.records|length }} records.</p>
+{% endblock %}

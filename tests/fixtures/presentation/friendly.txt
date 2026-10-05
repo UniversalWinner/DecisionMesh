@@ -1,0 +1,29 @@
+Decision Mesh
+
+Type: Permission
+
+Project: Project 1
+
+Reference: ABCD2345
+
+Observed: 2026-10-04T10:00:00Z · age 30s
+
+Status: Prompt observed; may already be answered
+
+Review: Check the original chat in Codex on This computer; find ABCD2345 in the local Decision Mesh inbox.
+
+---
+
+Type: Question
+
+Project: Project 1
+
+Reference: EFGH6789
+
+Observed: 2026-10-04T09:58:00Z · age 2m
+
+Status: Last known pending; current state unverified
+
+Last confirmed at: 2026-10-04T09:59:00Z
+
+Review: Check the original chat in Codex on This computer; find EFGH6789 in the local Decision Mesh inbox.

@@ -45,6 +45,113 @@ def secure_file(path, text):
     return path
 
 
+def file_security_state(path):
+    """Read exact owner/DACL (or POSIX ownership/mode) without changing it."""
+    if os.name != "nt":
+        info = path.stat()
+        return info.st_uid, info.st_mode
+
+    import ctypes
+    from ctypes import wintypes
+
+    advapi = ctypes.WinDLL("advapi32", use_last_error=True)
+    advapi.GetFileSecurityW.argtypes = [
+        wintypes.LPCWSTR, wintypes.DWORD, ctypes.c_void_p, wintypes.DWORD,
+        ctypes.POINTER(wintypes.DWORD),
+    ]
+    needed = wintypes.DWORD()
+    advapi.GetFileSecurityW(str(path), 5, None, 0, ctypes.byref(needed))
+    descriptor = ctypes.create_string_buffer(needed.value)
+    assert advapi.GetFileSecurityW(str(path), 5, descriptor, needed.value, ctypes.byref(needed))
+    return descriptor.raw
+
+
+def insecure_file(path, raw):
+    """Exclusively create a current-user-owned file with a deliberately invalid ACL."""
+    if os.name != "nt":
+        with path.open("xb") as stream:
+            stream.write(raw)
+        path.chmod(0o644)
+    else:
+        import ctypes
+        import msvcrt
+        from ctypes import wintypes
+
+        class SecurityAttributes(ctypes.Structure):
+            _fields_ = [
+                ("nLength", wintypes.DWORD),
+                ("lpSecurityDescriptor", ctypes.c_void_p),
+                ("bInheritHandle", wintypes.BOOL),
+            ]
+
+        advapi = ctypes.WinDLL("advapi32", use_last_error=True)
+        kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+        advapi.ConvertStringSecurityDescriptorToSecurityDescriptorW.argtypes = [
+            wintypes.LPCWSTR, wintypes.DWORD, ctypes.POINTER(ctypes.c_void_p),
+            ctypes.POINTER(wintypes.DWORD),
+        ]
+        kernel.CreateFileW.argtypes = [
+            wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD,
+            ctypes.POINTER(SecurityAttributes), wintypes.DWORD, wintypes.DWORD,
+            wintypes.HANDLE,
+        ]
+        kernel.CreateFileW.restype = wintypes.HANDLE
+        kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel.LocalFree.argtypes = [ctypes.c_void_p]
+        sid = capture._windows_sid()
+        descriptor = ctypes.c_void_p()
+        # Fix identity at creation; deliberately omit P from the sole-user
+        # DACL. Never repair an existing or foreign-owned fixture.
+        assert advapi.ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            f"O:{sid}D:(A;;FA;;;{sid})", 1, ctypes.byref(descriptor), None
+        )
+        try:
+            attributes = SecurityAttributes(ctypes.sizeof(SecurityAttributes), descriptor, False)
+            handle = kernel.CreateFileW(
+                str(path), 0x40000000, 3, ctypes.byref(attributes), 1, 128, None
+            )
+            assert handle != wintypes.HANDLE(-1).value
+        finally:
+            kernel.LocalFree(descriptor)
+        try:
+            fd = msvcrt.open_osfhandle(handle, os.O_WRONLY | os.O_BINARY | os.O_NOINHERIT)
+        except BaseException:
+            kernel.CloseHandle(handle)
+            raise
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(raw)
+
+        # Independently establish the native owner/unprotected-DACL precondition.
+        actual = ctypes.create_string_buffer(file_security_state(path))
+        advapi.GetSecurityDescriptorOwner.argtypes = [
+            ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p), ctypes.POINTER(wintypes.BOOL),
+        ]
+        advapi.ConvertSidToStringSidW.argtypes = [
+            ctypes.c_void_p, ctypes.POINTER(wintypes.LPWSTR),
+        ]
+        advapi.GetSecurityDescriptorControl.argtypes = [
+            ctypes.c_void_p, ctypes.POINTER(wintypes.WORD), ctypes.POINTER(wintypes.DWORD),
+        ]
+        owner = ctypes.c_void_p()
+        defaulted = wintypes.BOOL()
+        assert advapi.GetSecurityDescriptorOwner(actual, ctypes.byref(owner), ctypes.byref(defaulted))
+        owner_text = wintypes.LPWSTR()
+        assert advapi.ConvertSidToStringSidW(owner, ctypes.byref(owner_text))
+        try:
+            assert owner_text.value == sid
+        finally:
+            kernel.LocalFree(ctypes.cast(owner_text, ctypes.c_void_p))
+        control, revision = wintypes.WORD(), wintypes.DWORD()
+        assert advapi.GetSecurityDescriptorControl(
+            actual, ctypes.byref(control), ctypes.byref(revision)
+        )
+        assert not control.value & 0x1000  # SE_DACL_PROTECTED must be absent.
+    with pytest.raises(capture.CaptureError, match="^owner_acl_invalid$"):
+        capture.assert_owner_only(path)
+    assert path.read_bytes() == raw
+    return path
+
+
 def test_atomic_spool_runtime_absent_and_acl(tmp_path):
     spool = tmp_path / "spool"
     receipt = capture.write_envelope(spool, envelope())
@@ -383,6 +490,7 @@ def test_expected_metadata_late_security_and_bounded_read_checks(tmp_path, monke
     path = tmp_path / "owned" / "metadata.bin"
     capture.atomic_write_owner_only(path, b"original")
     injected = []
+    security_before = []
     real_fsync, real_open, real_symlink = capture.os.fsync, Path.open, Path.is_symlink
 
     def fsync(fd):
@@ -391,9 +499,8 @@ def test_expected_metadata_late_security_and_bounded_read_checks(tmp_path, monke
             injected.append(True)
             if boundary == "permissions":
                 path.unlink()
-                path.write_bytes(b"original")  # No protected owner ACL/mode.
-                if os.name != "nt":
-                    path.chmod(0o644)
+                insecure_file(path, b"original")
+                security_before.append(file_security_state(path))
             elif boundary == "oversized":
                 path.write_bytes(b"X" * 100_000)
         return result
@@ -430,6 +537,8 @@ def test_expected_metadata_late_security_and_bounded_read_checks(tmp_path, monke
     with real_open(path, "rb") as current:
         assert current.read() == (b"X" * 100_000 if boundary == "oversized" else b"original")
     assert reads == ([9] if boundary == "oversized" else [])
+    if boundary == "permissions":
+        assert file_security_state(path) == security_before[0]
     assert not list(path.parent.glob("*.part"))
 
 
@@ -458,13 +567,14 @@ def test_omitted_expected_content_retains_existing_unconditional_contract(tmp_pa
 
 
 def test_public_atomic_metadata_rejects_insecure_existing_file(tmp_path):
-    path = tmp_path / "unprotected.json"
-    path.write_text("original")
-    if os.name != "nt":
-        path.chmod(0o644)
-    with pytest.raises(capture.CaptureError, match="owner_acl_invalid"):
+    folder = capture.ensure_spool_dir(tmp_path / "owned")
+    path = insecure_file(folder / "unprotected.json", b"original")
+    security_before = file_security_state(path)
+    with pytest.raises(capture.CaptureError, match="^owner_acl_invalid$"):
         capture.atomic_write_owner_only(path, b"replacement")
-    assert path.read_text() == "original"
+    assert path.read_bytes() == b"original"
+    assert file_security_state(path) == security_before
+    assert not list(folder.glob("*.part"))
 
 
 def test_public_owner_lock_is_exclusive_across_processes(tmp_path):
@@ -818,19 +928,68 @@ def test_legacy_partial_counts_toward_ready_spool_capacity_without_unsafe_sweep(
 
 
 def test_concurrent_metadata_targets_leave_only_accepted_files(tmp_path):
+    import time
+
     folder = capture.ensure_spool_dir(tmp_path / "metadata")
-    capture.atomic_write_owner_only(folder / "seed.bin", b"seed")
+    seed = capture.atomic_write_owner_only(folder / "seed.bin", b"seed")
 
     def publish(index):
         path = folder / f"target-{index}.bin"
-        capture.atomic_write_owner_only(path, f"accepted-{index}".encode())
-        return path
+        partial = folder / f".metadata-{capture._metadata_identity(path)}.part"
+        # Lock waits are deliberately bounded. Retry only an unaccepted busy
+        # attempt, never other errors, and fail if the fixed retry cap is spent.
+        for attempt in range(8):
+            try:
+                capture.atomic_write_owner_only(path, f"accepted-{index}".encode())
+                return path
+            except capture.CaptureError as error:
+                if error.code != "capture_busy":
+                    raise
+                assert not path.exists()
+                assert not partial.exists()
+                assert seed.read_bytes() == b"seed"
+                if attempt == 7:
+                    raise
+                time.sleep(0.01)
 
     with ThreadPoolExecutor(max_workers=4) as pool:
         paths = list(pool.map(publish, range(16)))
+    assert len(set(paths)) == 16
     assert all(
         path.read_bytes() == f"accepted-{index}".encode() for index, path in enumerate(paths)
     )
+    assert seed.read_bytes() == b"seed"
+    assert not list(folder.glob("*.part"))
+
+
+@pytest.mark.parametrize("existing", [False, True], ids=["new-target", "replacement"])
+def test_metadata_quota_busy_preserves_accepted_bytes_then_retry_succeeds(tmp_path, existing):
+    folder = capture.ensure_spool_dir(tmp_path / "metadata")
+    seed = capture.atomic_write_owner_only(folder / "seed.bin", b"accepted seed")
+    target = folder / "target.bin"
+    if existing:
+        capture.atomic_write_owner_only(target, b"accepted target")
+    partial = folder / f".metadata-{capture._metadata_identity(target)}.part"
+
+    # Hold the real quota lock while another thread exhausts the unchanged
+    # production timeout. No mocked error or production timeout adjustment.
+    with capture.owner_file_lock(folder / ".partial-quota.lock"):
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            attempt = pool.submit(capture.atomic_write_owner_only, target, b"replacement")
+            with pytest.raises(capture.CaptureError, match="^capture_busy$"):
+                attempt.result(timeout=5)
+        assert seed.read_bytes() == b"accepted seed"
+        if existing:
+            assert target.read_bytes() == b"accepted target"
+        else:
+            assert not target.exists()
+        assert not partial.exists()
+
+    # Exactly one retry after release: busy preserved the accepted content;
+    # replacement occurs only on this successfully returned write.
+    assert capture.atomic_write_owner_only(target, b"replacement") == target
+    assert target.read_bytes() == b"replacement"
+    assert seed.read_bytes() == b"accepted seed"
     assert not list(folder.glob("*.part"))
 
 
@@ -935,12 +1094,13 @@ def test_existing_insecure_reserved_files_are_never_repaired(tmp_path, kind):
         path = folder / f".metadata-{identity}.part"
     else:
         path = folder / ".diagnostic.part"
-    # Deliberately inherits the secure parent's ACL rather than its own final
-    # protected ACL. New code must not silently repair pre-existing objects.
-    path.write_bytes(b"existing unaccepted data")
-    with pytest.raises(capture.CaptureError, match="owner_acl_invalid"):
+    # Explicit current owner isolates the invalid DACL from creator defaults.
+    insecure_file(path, b"existing unaccepted data")
+    security_before = file_security_state(path)
+    with pytest.raises(capture.CaptureError, match="^owner_acl_invalid$"):
         capture.write_envelope(folder, envelope())
     assert path.read_bytes() == b"existing unaccepted data"
-    with pytest.raises(capture.CaptureError, match="owner_acl_invalid"):
+    assert file_security_state(path) == security_before
+    with pytest.raises(capture.CaptureError, match="^owner_acl_invalid$"):
         capture.assert_owner_only(path)
     assert not list(folder.glob("*.json"))

@@ -327,7 +327,8 @@ def execute(fixture: Path, inputs: dict, api: Any, env: dict[str, str],
                     require((info.st_dev, info.st_ino) == profile_identity,
                             "profile_identity_changed")
                     cleanup_phase = "cleanup_profile_deletion"
-                    api.delete_profile(account["sid"], profile)
+                    api.delete_profile(account["sid"], profile,
+                                       owned_work=profile / "AppData/Local" / fixture.name)
                 cleanup_phase = "cleanup_account_deletion"
                 api.delete_account(name, expected_sid=account["sid"],
                                    expected_marker=account["comment"])

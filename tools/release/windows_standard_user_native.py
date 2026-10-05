@@ -7,6 +7,7 @@ from __future__ import annotations
 import ctypes as C
 import os
 import socket
+import stat
 import struct
 import subprocess
 import time
@@ -19,10 +20,11 @@ class NativeError(RuntimeError):
 
     def __init__(self, code: str, *, operation: str | None = None,
                  hresult: int | None = None, winerror: int | None = None,
-                 errno: int | None = None) -> None:
+                 errno: int | None = None, residual: dict | None = None) -> None:
         super().__init__(code)
         self.code, self.operation = code, operation
         self.hresult, self.winerror, self.errno = hresult, winerror, errno
+        self.residual = residual
 
 
 DIAGNOSTIC_CODES = frozenset({
@@ -34,7 +36,10 @@ DIAGNOSTIC_CODES = frozenset({
     "failed_creation_account_state_uncertain", "account_query_failed", "account_delete_failed",
     "fixture_cleanup_incomplete", "fixture_changed_during_cleanup", "fixture_identity_changed",
     "owned_processes_not_exited", "suspended_child_not_exited", "native_api_failed",
+    "profile_observation_failed", "owned_work_path_invalid",
 })
+
+RESIDUAL_LABELS = ("profile_root", "profile_registry", "owned_work", "user_data", "environment")
 DIAGNOSTIC_OPERATIONS = frozenset({
     "CreateProfile", "DeleteProfileW", "RegOpenKeyExW", "account_creation", "interactive_logon",
     "profile_create", "profile_path_validation", "profile_identity", "profile_registry_binding",
@@ -45,6 +50,45 @@ DIAGNOSTIC_OPERATIONS = frozenset({
     "cleanup_profile_deletion", "cleanup_account_deletion", "cleanup_account_absence",
     "cleanup_fixture", "cleanup_fixture_absence",
 })
+
+
+def plain_value(data: object, key: str) -> object:
+    """Do not dispatch subclass methods or hostile dictionary-key comparisons."""
+    if type(data) is not dict:
+        return None
+    try:
+        return data.get(key)
+    except BaseException:  # noqa: BLE001 - diagnostic attributes are untrusted
+        return None
+
+
+def directory_state(path: Path, identities: dict, *, capture: bool = False) -> dict:
+    """Check ancestors top-down without following the entry being inspected.
+
+    These path-based observations narrow replacement races; they are not atomic.
+    Never inspect a descendant after an ancestor is absent, unreadable or changed.
+    """
+    for part in (*reversed(path.parents), path):
+        try:
+            info = part.lstat()
+        except FileNotFoundError:
+            return {"state": "absent"}
+        if stat.S_ISLNK(info.st_mode) or getattr(info, "st_file_attributes", 0) & 1024:
+            raise NativeError("reparse_path")
+        identity = (info.st_dev, info.st_ino)
+        if not stat.S_ISDIR(info.st_mode) or (
+                part in identities and identities[part] != identity) or (
+                not capture and part not in identities):
+            raise NativeError("profile_identity_changed")
+        identities[part] = identity
+    return {"state": "present"}
+
+
+def query_error_state(error: BaseException) -> dict:
+    """Only numeric OS failure fields can accompany a static residual state."""
+    detail = Native.diagnostic(error, "cleanup_profile_deletion")
+    return {"state": "query_error", **{key: detail[key] for key in ("winerror", "errno")
+                                      if key in detail}}
 
 
 class SidAndAttributes(C.Structure):
@@ -109,7 +153,7 @@ class Native:
         if type(data) is dict:
             for key, allowed in (("code", DIAGNOSTIC_CODES),
                                  ("operation", DIAGNOSTIC_OPERATIONS)):
-                value = data.get(key)
+                value = plain_value(data, key)
                 if type(value) is str and value in allowed:
                     detail[key] = value
         fields = ("hresult", "winerror", "errno") if isinstance(error, NativeError) else (
@@ -121,6 +165,23 @@ class Native:
                 value = None
             if type(value) is int and 0 <= value <= 0xFFFFFFFF:
                 detail[key] = value
+        residual = plain_value(data, "residual") if isinstance(error, NativeError) else None
+        if type(residual) is dict:
+            projected = {}
+            for label in RESIDUAL_LABELS:
+                item = plain_value(residual, label)
+                if type(item) is not dict:
+                    continue
+                state = plain_value(item, "state")
+                if type(state) is not str or state not in {"present", "absent", "query_error"}:
+                    continue
+                projected[label] = {"state": state}
+                for key in ("winerror", "errno"):
+                    value = plain_value(item, key)
+                    if type(value) is int and 0 <= value <= 0xFFFFFFFF:
+                        projected[label][key] = value
+            if projected:
+                detail["residual"] = projected
         return detail
 
     def __init__(self) -> None:
@@ -239,12 +300,19 @@ class Native:
                               hresult=code & 0xFFFFFFFF)
         return Path(buf.value)
 
-    def profile_path(self, sid: str) -> Path:
+    def profile_path(self, sid: str, *, missing: bool = False) -> Path | None:
         import winreg
         key = r"SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList" + "\\" + sid
-        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, key) as handle:
+        try:
+            handle = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, key)
+        except OSError as error:
+            code = getattr(error, "winerror", None)
+            if missing and type(code) is int and code == 2:
+                return None  # Only absence at key-open proves no ProfileList registration.
+            raise
+        with handle:
             value, kind = winreg.QueryValueEx(handle, "ProfileImagePath")
-        if kind not in (winreg.REG_SZ, winreg.REG_EXPAND_SZ):
+        if kind not in (winreg.REG_SZ, winreg.REG_EXPAND_SZ) or type(value) is not str or not value:
             raise NativeError("profile_registration_invalid")
         return Path(os.path.expandvars(value))
 
@@ -378,23 +446,69 @@ class Native:
             self.close(handle)
             raise
 
-    def delete_profile(self, sid: str, profile: Path) -> None:
+    def delete_profile(self, sid: str, profile: Path, *, owned_work: Path | None = None) -> None:
         deadline = time.monotonic() + 10
         while self.loaded_profile(sid) and time.monotonic() < deadline:
             time.sleep(0.05)
         if self.profile_path(sid) != profile or self.loaded_profile(sid):
             raise NativeError("profile_cleanup_unproven")
+        if not profile.is_absolute() or str(profile).startswith(("\\\\", "//")) or ".." in profile.parts:
+            raise NativeError("local_path_required")
+        locations = {}
+        if owned_work is not None:
+            suffix = owned_work.name.removeprefix("decisionmesh-standard-user-")
+            if (owned_work.parent != profile / "AppData/Local"
+                    or owned_work.name != "decisionmesh-standard-user-" + suffix
+                    or len(suffix) != 32 or any(c not in "0123456789abcdef" for c in suffix)):
+                raise NativeError("owned_work_path_invalid")
+            locations = {"owned_work": owned_work, "user_data": owned_work / "user-data",
+                         "environment": owned_work / "environment"}
+        identities = {}
+        if directory_state(profile, identities, capture=True)["state"] != "present":
+            raise NativeError("profile_cleanup_unproven")
+        for path in locations.values():
+            try:
+                directory_state(path, identities, capture=True)
+            except (OSError, NativeError):
+                pass  # Diagnostic uncertainty never expands deletion authority.
+        # Best-effort descendant baselines must not hide a changed profile ancestor.
+        if directory_state(profile, identities)["state"] != "present":
+            raise NativeError("profile_cleanup_unproven")
         if not self.call("userenv", "DeleteProfileW", W.BOOL,
                          [W.LPCWSTR, W.LPCWSTR, W.LPCWSTR], sid, str(profile), None):
             code = C.get_last_error()
             raise NativeError("profile_delete_failed", operation="DeleteProfileW", winerror=code)
-        if profile.exists():
-            raise NativeError("profile_delete_not_observed")
-        try:
-            self.profile_path(sid)
-        except FileNotFoundError:
-            return
-        raise NativeError("profile_registration_remains")
+        deadline = time.monotonic() + 10
+        while True:
+            residual, failure = {}, None
+            try:
+                residual["profile_root"] = directory_state(profile, identities)
+            except (OSError, NativeError) as error:
+                residual["profile_root"] = query_error_state(error)
+                code = self.diagnostic(error, "cleanup_profile_deletion")["code"]
+                failure = code if code in DIAGNOSTIC_CODES else "profile_observation_failed"
+            try:
+                registered = self.profile_path(sid, missing=True)
+                residual["profile_registry"] = {"state": "absent" if registered is None else "present"}
+                if registered is not None and registered != profile:
+                    failure = "profile_binding_mismatch"
+            except (OSError, NativeError) as error:
+                residual["profile_registry"] = query_error_state(error)
+                failure = failure or "profile_observation_failed"
+            if all(item["state"] == "absent" for item in residual.values()):
+                return
+            remaining = deadline - time.monotonic()
+            if failure or remaining <= 0:
+                for label, path in locations.items():
+                    try:
+                        residual[label] = directory_state(path, identities)
+                    except (OSError, NativeError) as error:
+                        residual[label] = query_error_state(error)
+                code = failure or ("profile_delete_not_observed"
+                                   if residual["profile_root"]["state"] == "present"
+                                   else "profile_registration_remains")
+                raise NativeError(code, operation="cleanup_profile_deletion", residual=residual)
+            time.sleep(min(0.05, remaining))
 
     def delete_account(self, name: str, *, expected_sid: str, expected_marker: str) -> None:
         expected = {"name": name, "sid": expected_sid, "comment": expected_marker}

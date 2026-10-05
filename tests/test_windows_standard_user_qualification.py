@@ -172,9 +172,10 @@ class FakeNative:
     def close(self, handle):
         self.hit("close_" + str(handle))
 
-    def delete_profile(self, sid, profile):
+    def delete_profile(self, sid, profile, *, owned_work=None):
         self.hit("delete_profile")
         assert sid == SID and profile == self.profile
+        assert owned_work == profile / "AppData/Local" / self.fixture.name
         self.profile.rmdir()
 
     delete_account = native.Native.delete_account  # Exercise the real guard over fake calls.
@@ -495,8 +496,8 @@ def test_uncertain_account_creation_preserves_unproven_account(case):
 def test_account_change_during_profile_cleanup_refuses_deletion(case, state):
     api = FakeNative(case[0])
     original = api.delete_profile
-    def change_after_profile(sid, profile):
-        original(sid, profile)
+    def change_after_profile(sid, profile, *, owned_work=None):
+        original(sid, profile, owned_work=owned_work)
         if state == "replacement":
             api.current.update(sid="S-1-5-21-999-999-999-999", comment="foreign")
         elif state == "absent":
@@ -568,7 +569,7 @@ def test_profile_failures_keep_original_and_cleanup_diagnostics(case, monkeypatc
         return original_stat(path, **kwargs)
     def registry(sid):
         raise PermissionError(13, secret, secret)
-    def cleanup(sid, profile):
+    def cleanup(sid, profile, *, owned_work=None):
         raise RuntimeError(secret)
     if fault == "create":
         api.create_profile = create
@@ -697,6 +698,7 @@ def test_open_hive_is_loaded_and_close_failure_never_proves_unloaded(monkeypatch
 
 
 def test_delete_profile_captures_last_error_immediately_without_other_calls(case, monkeypatch):
+    case[0].mkdir()
     api = object.__new__(native.Native)
     api.loaded_profile = lambda sid: False
     api.profile_path = lambda sid: case[0]
@@ -793,3 +795,332 @@ def test_uppercase_windows_environment_launches_or_cleans_missing_root(case, mis
         assert observed["USERPROFILE"] == str(api.profile)
         assert observed["PIP_NO_INDEX"] == "1"
         assert observed["PIP_FIND_LINKS"] == str(fixture / "input/wheels")
+
+
+@pytest.fixture
+def cleanup_observation(tmp_path, monkeypatch):
+    """No DLLs, registry, process or actual waiting: only owned empty directories."""
+    profile = tmp_path / "observation-profile"
+    profile.mkdir()
+    api = object.__new__(native.Native)
+    state = {"registry": profile, "calls": [], "now": 0.0, "sleep": [], "tick": None}
+    api.loaded_profile = lambda sid: False
+    def registration(sid, *, missing=False):
+        value = state["registry"]
+        if isinstance(value, BaseException):
+            raise value
+        if value is None and not missing:
+            error = FileNotFoundError(2, "synthetic missing key")
+            error.winerror = 2
+            raise error
+        return value
+    def call(lib, name, result, types, *args):
+        assert (lib, name, args) == ("userenv", "DeleteProfileW", (SID, str(profile), None))
+        state["calls"].append(name)
+        if state.get("delete"):
+            state["delete"]()
+        return 1
+    def sleep(seconds):
+        assert 0 < seconds <= 0.05
+        state["sleep"].append(seconds)
+        state["now"] += seconds
+        if state["tick"]:
+            state["tick"]()
+    api.profile_path, api.call = registration, call
+    monkeypatch.setattr(native.time, "monotonic", lambda: state["now"])
+    monkeypatch.setattr(native.time, "sleep", sleep)
+    return api, profile, state
+
+
+@pytest.mark.parametrize("delayed", [False, True])
+def test_profile_cleanup_observation_waits_for_both_absences_once(cleanup_observation, delayed):
+    api, profile, state = cleanup_observation
+    def remove():
+        profile.rmdir()
+        state["registry"] = None
+        state["tick"] = None
+    if delayed:
+        state["tick"] = lambda: remove() if state["now"] >= 0.15 else None
+    else:
+        state["delete"] = remove
+    api.delete_profile(SID, profile)
+    assert state["calls"] == ["DeleteProfileW"]
+    assert bool(state["sleep"]) is delayed
+    assert state["now"] < 1
+
+
+@pytest.mark.parametrize("remaining", ["root", "registry", "both"])
+def test_profile_cleanup_observation_deadline_keeps_uncertain_cleanup_failed(
+        cleanup_observation, remaining):
+    api, profile, state = cleanup_observation
+    def remove_some():
+        if remaining == "registry":
+            profile.rmdir()
+        if remaining == "root":
+            state["registry"] = None
+    state["delete"] = remove_some
+    with pytest.raises(native.NativeError) as caught:
+        api.delete_profile(SID, profile)
+    detail = api.diagnostic(caught.value, "cleanup_profile_deletion")
+    assert detail["residual"]["profile_root"]["state"] == (
+        "absent" if remaining == "registry" else "present")
+    assert detail["residual"]["profile_registry"]["state"] == (
+        "absent" if remaining == "root" else "present")
+    assert state["calls"] == ["DeleteProfileW"]
+    assert 10 <= state["now"] <= 10.05 and len(state["sleep"]) <= 201
+
+
+@pytest.mark.parametrize("fault", ["access", "registry", "binding", "identity", "reparse"])
+def test_profile_cleanup_observation_rejects_errors_or_changed_identity_immediately(
+        cleanup_observation, monkeypatch, fault):
+    api, profile, state = cleanup_observation
+    original = Path.lstat
+    def altered(path, *args, **kwargs):
+        if path == profile and state["calls"]:
+            if fault == "access":
+                raise PermissionError(13, "PRIVATE-root-path")
+            info = original(path, *args, **kwargs)
+            if fault in {"identity", "reparse"}:
+                return SimpleNamespace(st_dev=info.st_dev, st_ino=info.st_ino + 1,
+                                       st_mode=info.st_mode,
+                                       st_file_attributes=1024 if fault == "reparse" else 0)
+        return original(path, *args, **kwargs)
+    monkeypatch.setattr(Path, "lstat", altered)
+    def change():
+        if fault == "registry":
+            state["registry"] = PermissionError(13, "PRIVATE-registry")
+        elif fault == "binding":
+            state["registry"] = profile.parent / "PRIVATE-foreign-profile"
+    state["delete"] = change
+    with pytest.raises(native.NativeError) as caught:
+        api.delete_profile(SID, profile)
+    detail = api.diagnostic(caught.value, "cleanup_profile_deletion")
+    assert detail["residual"]
+    assert not state["sleep"] and state["calls"] == ["DeleteProfileW"]
+    assert "PRIVATE" not in json.dumps(detail)
+
+
+def test_profile_cleanup_residual_has_only_exact_fixture_locations(cleanup_observation):
+    api, profile, _state = cleanup_observation
+    work = profile / "AppData/Local" / ("decisionmesh-standard-user-" + NONCE)
+    (work / "user-data").mkdir(parents=True)
+    (work / "environment").mkdir()
+    (profile / "PRIVATE-unrelated").mkdir()
+    with pytest.raises(native.NativeError) as caught:
+        api.delete_profile(SID, profile, owned_work=work)
+    detail = api.diagnostic(caught.value, "cleanup_profile_deletion")
+    assert detail["residual"] == {label: {"state": "present"} for label in (
+        "profile_root", "profile_registry", "owned_work", "user_data", "environment")}
+    assert str(profile) not in json.dumps(detail) and "PRIVATE" not in json.dumps(detail)
+
+
+@pytest.mark.parametrize("location", ["AppData", "AppData/Local"])
+def test_profile_cleanup_residual_does_not_query_below_replaced_ancestor(
+        cleanup_observation, monkeypatch, location):
+    api, profile, state = cleanup_observation
+    work = profile / "AppData/Local" / ("decisionmesh-standard-user-" + NONCE)
+    (work / "user-data").mkdir(parents=True)
+    (work / "environment").mkdir()
+    blocked = profile / location
+    original = Path.lstat
+    def altered(path, *args, **kwargs):
+        if state["calls"]:
+            assert not (path != blocked and path.is_relative_to(blocked)), "followed changed parent"
+            if path == blocked:
+                info = original(path, *args, **kwargs)
+                return SimpleNamespace(st_dev=info.st_dev, st_ino=info.st_ino + 1,
+                                       st_mode=info.st_mode, st_file_attributes=0)
+        return original(path, *args, **kwargs)
+    monkeypatch.setattr(Path, "lstat", altered)
+    with pytest.raises(native.NativeError) as caught:
+        api.delete_profile(SID, profile, owned_work=work)
+    detail = api.diagnostic(caught.value, "cleanup_profile_deletion")
+    assert all(detail["residual"][label]["state"] == "query_error"
+               for label in ("owned_work", "user_data", "environment"))
+
+
+@pytest.mark.parametrize("order", ["root_first", "registry_first"])
+def test_profile_cleanup_observes_both_absences_in_same_iteration(cleanup_observation, order):
+    api, profile, state = cleanup_observation
+    def tick():
+        if state["now"] >= 0.05 and order == "root_first" and profile.exists():
+            profile.rmdir()
+        if state["now"] >= 0.05 and order == "registry_first":
+            state["registry"] = None
+        if state["now"] >= 0.15:
+            if profile.exists():
+                profile.rmdir()
+            state["registry"] = None
+    state["tick"] = tick
+    api.delete_profile(SID, profile)
+    assert 0.15 <= state["now"] < 0.2
+    assert state["calls"] == ["DeleteProfileW"]
+
+
+@pytest.mark.parametrize("fault", ["open_missing", "open_path_missing", "open_errno_only",
+                                  "open_denied", "value_missing", "close_missing", "kind", "value"])
+def test_profile_registration_absence_is_only_exact_key_open_not_found(monkeypatch, fault):
+    import sys
+    events = []
+    def missing(code=2):
+        error = FileNotFoundError(2, "PRIVATE-registry")
+        if code is not None:
+            error.winerror = code
+        return error
+    class Key:
+        def __enter__(self):
+            return self
+        def __exit__(self, *args):
+            events.append("close")
+            if fault == "close_missing":
+                raise missing()
+    def open_key(*args):
+        events.append("open")
+        if fault.startswith("open_"):
+            raise missing({"open_missing": 2, "open_path_missing": 3,
+                           "open_errno_only": None, "open_denied": 5}[fault])
+        return Key()
+    def query(*args):
+        events.append("query")
+        if fault == "value_missing":
+            raise missing()
+        return (123 if fault == "value" else "C:/synthetic-profile",
+                999 if fault == "kind" else 1)
+    monkeypatch.setitem(sys.modules, "winreg", SimpleNamespace(
+        HKEY_LOCAL_MACHINE=1, REG_SZ=1, REG_EXPAND_SZ=2, OpenKey=open_key, QueryValueEx=query))
+    api = object.__new__(native.Native)
+    if fault == "open_missing":
+        assert api.profile_path(SID, missing=True) is None
+        assert events == ["open"]
+    else:
+        with pytest.raises((OSError, native.NativeError)):
+            api.profile_path(SID, missing=True)
+    assert events == (["open"] if fault.startswith("open_") else ["open", "query", "close"])
+
+
+@pytest.mark.parametrize("mutation", ["reparse", "identity", "denied"])
+def test_profile_cleanup_residual_checks_root_before_any_descendant(
+        cleanup_observation, monkeypatch, mutation):
+    api, profile, state = cleanup_observation
+    work = profile / "AppData/Local" / ("decisionmesh-standard-user-" + NONCE)
+    (work / "user-data").mkdir(parents=True)
+    original = Path.lstat
+    def altered(path, *args, **kwargs):
+        if state["calls"]:
+            assert not (path != profile and path.is_relative_to(profile)), "followed changed root"
+            if path == profile:
+                if mutation == "denied":
+                    raise PermissionError(13, "PRIVATE-root")
+                info = original(path, *args, **kwargs)
+                return SimpleNamespace(st_dev=info.st_dev, st_ino=info.st_ino + 1,
+                                       st_mode=info.st_mode,
+                                       st_file_attributes=1024 if mutation == "reparse" else 0)
+        return original(path, *args, **kwargs)
+    monkeypatch.setattr(Path, "lstat", altered)
+    with pytest.raises(native.NativeError) as caught:
+        api.delete_profile(SID, profile, owned_work=work)
+    detail = api.diagnostic(caught.value, "cleanup_profile_deletion")
+    assert all(detail["residual"][label]["state"] == "query_error"
+               for label in ("profile_root", "owned_work", "user_data", "environment"))
+    assert not state["sleep"]
+
+
+@pytest.mark.parametrize("fault", ["outside", "nonfixture", "traversal"])
+def test_profile_cleanup_rejects_unowned_diagnostic_location_before_delete(
+        cleanup_observation, fault):
+    api, profile, state = cleanup_observation
+    work = {"outside": profile.parent / ("decisionmesh-standard-user-" + NONCE),
+            "nonfixture": profile / "AppData/Local/PRIVATE-existing-data",
+            "traversal": profile / "AppData/Local/../PRIVATE"}[fault]
+    with pytest.raises(native.NativeError):
+        api.delete_profile(SID, profile, owned_work=work)
+    assert not state["calls"]
+
+
+def test_profile_cleanup_residual_serialization_ignores_hostile_or_unrecognized_data():
+    class Hostile:
+        def __str__(self):
+            raise AssertionError("never format")
+        def __eq__(self, other):
+            raise AssertionError("never compare")
+    class HostileDict(dict):
+        def get(self, *args):
+            raise AssertionError("never inspect subclass")
+    error = native.NativeError("profile_delete_not_observed", residual={
+        "profile_root": {"state": "query_error", "winerror": 5, "errno": 13,
+                         "path": "PRIVATE", "name": Hostile(), "content": "PRIVATE"},
+        "profile_registry": {"state": Hostile()},
+        "owned_work": {"state": "present", "winerror": True, "errno": -1},
+        "user_data": HostileDict(state="present"),
+        "environment": {"state": "absent", "winerror": 2**32, "errno": "PRIVATE"},
+        "PRIVATE-discovered": {"state": "present"},
+    })
+    detail = native.Native.diagnostic(error, "cleanup_profile_deletion")
+    assert detail["residual"] == {
+        "profile_root": {"state": "query_error", "winerror": 5, "errno": 13},
+        "owned_work": {"state": "present"}, "environment": {"state": "absent"}}
+    assert "PRIVATE" not in json.dumps(detail)
+    error.residual = HostileDict(profile_root={"state": "present"})
+    assert "residual" not in native.Native.diagnostic(error, "cleanup_profile_deletion")
+    error = RuntimeError("PRIVATE")
+    error.residual = {"profile_root": {"state": "present"}}
+    assert "residual" not in native.Native.diagnostic(error, "cleanup_profile_deletion")
+
+
+def test_profile_cleanup_residual_ignores_hostile_key_comparisons():
+    class HostileKey:
+        def __hash__(self):
+            return hash("profile_root")
+        def __eq__(self, other):
+            raise AssertionError("untrusted equality")
+    error = native.NativeError("profile_delete_not_observed", residual={HostileKey(): "PRIVATE"})
+    assert "residual" not in native.Native.diagnostic(error, "cleanup_profile_deletion")
+
+
+@pytest.mark.parametrize("fault", ["persistent", "denied", "binding"])
+def test_profile_observation_uncertainty_preserves_account_and_fixture(case, monkeypatch, fault):
+    api = FakeNative(case[0])
+    api.delete_profile = native.Native.delete_profile.__get__(api)
+    api.loaded_profile = lambda sid: False
+    called = []
+    def registration(sid, *, missing=False):
+        if missing and fault == "denied":
+            raise PermissionError(13, "PRIVATE-registry")
+        if missing and fault == "binding":
+            return api.profile.parent / "PRIVATE-foreign"
+        return api.profile
+    def call(lib, name, *args):
+        assert name == "DeleteProfileW", "account deletion must not be reached"
+        called.append(name)
+        return 1
+    api.profile_path, api.call = registration, call
+    clock = [0.0]
+    monkeypatch.setattr(native.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(native.time, "sleep", lambda seconds: clock.__setitem__(0, clock[0] + seconds))
+    result = run(case, api)
+    assert result["child"]["status"] == "PASS"
+    assert result["status"] == "FAILED_CLEANUP_UNPROVEN" and not result["cleanup_complete"]
+    assert result["cleanup_failed_phase"] == "cleanup_profile_deletion"
+    assert result["cleanup_failure"]["residual"]
+    assert api.current is not None and case[0].exists() and api.password.value == ""
+    assert called == ["DeleteProfileW"] and "PRIVATE" not in json.dumps(result)
+
+
+def test_optional_residual_baseline_cannot_hide_root_replacement_before_delete(
+        cleanup_observation, monkeypatch):
+    api, profile, state = cleanup_observation
+    work = profile / "AppData/Local" / ("decisionmesh-standard-user-" + NONCE)
+    (work / "user-data").mkdir(parents=True)
+    original, root_reads = Path.lstat, []
+    def changed(path, *args, **kwargs):
+        info = original(path, *args, **kwargs)
+        if path == profile:
+            root_reads.append(path)
+            if len(root_reads) > 1:
+                return SimpleNamespace(st_dev=info.st_dev, st_ino=info.st_ino + 1,
+                                       st_mode=info.st_mode, st_file_attributes=0)
+        return info
+    monkeypatch.setattr(Path, "lstat", changed)
+    with pytest.raises(native.NativeError):
+        api.delete_profile(SID, profile, owned_work=work)
+    assert not state["calls"], "replacement discovered before deletion must prevent deletion"

@@ -30,6 +30,10 @@ SYSTEM = "S-1-5-18"
 class QualificationError(RuntimeError):
     """Fixed redacted error codes."""
 
+    def __init__(self, code: str) -> None:
+        super().__init__(code)
+        self.code = code
+
 
 def require(value: object, code: str) -> None:
     if not value:
@@ -243,12 +247,15 @@ def execute(fixture: Path, inputs: dict, api: Any, env: dict[str, str],
         phase = "interactive_logon"
         token = api.logon(name, password)
         validate_token(api.token_info(token), account["sid"])
-        phase = "profile_creation"
+        phase = "profile_create"
         attempted_profile = True
         profile = api.create_profile(name, account["sid"])
+        phase = "profile_path_validation"
         safe_path(profile)
+        phase = "profile_identity"
         info = profile.stat()
         profile_identity = (info.st_dev, info.st_ino)
+        phase = "profile_registry_binding"
         require(api.profile_path(account["sid"]).resolve() == profile.resolve(),
                 "profile_binding_mismatch")
         phase = "fixture_staging"
@@ -276,12 +283,13 @@ def execute(fixture: Path, inputs: dict, api: Any, env: dict[str, str],
                 and observed.get("lifetime_lock_released") is True, "child_result_invalid")
         staged["out/result.json"] = digest(outcome)
         result.update(status="PASS", child=observed, parent=parent)
-    except BaseException:  # noqa: BLE001 - redact arbitrary native credential-bearing failures
+    except BaseException as error:  # noqa: BLE001 - project only bounded diagnostics
         result["status"] = "FAILED_OR_UNSUPPORTED"
         result["failed_phase"] = phase
-        # Never retain an arbitrary native/test exception string: it may contain a password.
+        result["failure"] = api.diagnostic(error, phase)
     finally:
         ctypes.memset(ctypes.addressof(password), 0, ctypes.sizeof(password))
+        cleanup_phase = "cleanup_process_exit"
         try:
             if process:
                 if job:
@@ -292,35 +300,50 @@ def execute(fixture: Path, inputs: dict, api: Any, env: dict[str, str],
                 elif not api.wait(process.process, 0):
                     api.terminate(process.process, job=False)  # Our still-suspended creation handle.
                     require(api.wait(process.process, 10_000), "suspended_child_not_exited")
+                cleanup_phase = "cleanup_process_handles"
                 api.close(process.thread)
                 api.close(process.process)
             if job:
+                cleanup_phase = "cleanup_job_handle"
                 api.close(job)
             if token:
+                cleanup_phase = "cleanup_logon_token"
                 api.close(token)
                 token = None
             if attempted_account and not created:
+                cleanup_phase = "cleanup_creation_state"
                 require(api.account(name) is None, "failed_creation_account_state_uncertain")
             if created:
+                cleanup_phase = "cleanup_account_identity"
                 require(account is not None and api.account(name) == account,
                         "account_cleanup_identity_changed")
                 if attempted_profile:
+                    cleanup_phase = "cleanup_profile_proof"
                     require(profile is not None, "profile_cleanup_unproven")
+                    cleanup_phase = "cleanup_profile_path"
                     safe_path(profile)
+                    cleanup_phase = "cleanup_profile_identity"
                     info = profile.stat()
                     require((info.st_dev, info.st_ino) == profile_identity,
                             "profile_identity_changed")
+                    cleanup_phase = "cleanup_profile_deletion"
                     api.delete_profile(account["sid"], profile)
+                cleanup_phase = "cleanup_account_deletion"
                 api.delete_account(name, expected_sid=account["sid"],
                                    expected_marker=account["comment"])
+                cleanup_phase = "cleanup_account_absence"
                 require(api.account(name) is None, "account_cleanup_not_observed")
             if staged is not None:
+                cleanup_phase = "cleanup_fixture"
                 fixture_cleanup(fixture, identity, staged)
+            cleanup_phase = "cleanup_fixture_absence"
             require(not fixture.exists(), "fixture_cleanup_incomplete")
             result["cleanup_complete"] = True
-        except BaseException:  # noqa: BLE001 - retain uncertainty without exposing native errors
+        except BaseException as error:  # noqa: BLE001 - retain separately bounded cleanup evidence
             result["status"] = "FAILED_CLEANUP_UNPROVEN"
             result["cleanup_complete"] = False
+            result["cleanup_failed_phase"] = cleanup_phase
+            result["cleanup_failure"] = api.diagnostic(error, cleanup_phase)
         if created:
             result["fixture_account"] = name
             result["fixture_sid"] = account["sid"] if account else None

@@ -70,6 +70,8 @@ def case(tmp_path):
 
 
 class FakeNative:
+    diagnostic = staticmethod(native.Native.diagnostic)
+
     def __init__(self, fixture, *, fail=None):
         self.fixture, self.fail, self.calls = fixture, fail, []
         self.current = None
@@ -539,3 +541,220 @@ def test_native_account_deletion_rechecks_identity_at_call_boundary(state):
         with pytest.raises(native.NativeError):
             api.delete_account(expected["name"], expected_sid=SID, expected_marker=expected["comment"])
     assert events == (["query", "delete"] if state in {"owned", "delete_error"} else ["query"])
+
+
+@pytest.mark.parametrize("fault,phase", [
+    ("create", "profile_create"), ("path", "profile_path_validation"),
+    ("identity", "profile_identity"), ("registry", "profile_registry_binding"),
+    ("binding", "profile_registry_binding"),
+])
+def test_profile_failures_keep_original_and_cleanup_diagnostics(case, monkeypatch, fault, phase):
+    api = FakeNative(case[0])
+    secret = "PRIVATE-exception-args-password-path"
+    original_safe = q.safe_path
+    original_stat = Path.stat
+    def create(name, sid):
+        raise native.NativeError("new_profile_required")
+    def safe(path, **kwargs):
+        if path == api.profile:
+            raise q.QualificationError("reparse_path")
+        return original_safe(path, **kwargs)
+    def stat_profile(path, **kwargs):
+        if path == api.profile and kwargs.get("follow_symlinks", True):
+            raise PermissionError(13, secret, secret)
+        return original_stat(path, **kwargs)
+    def registry(sid):
+        raise PermissionError(13, secret, secret)
+    def cleanup(sid, profile):
+        raise RuntimeError(secret)
+    if fault == "create":
+        api.create_profile = create
+    elif fault == "path":
+        monkeypatch.setattr(q, "safe_path", safe)
+    elif fault == "identity":
+        monkeypatch.setattr(Path, "stat", stat_profile)
+    elif fault == "registry":
+        api.profile_path, api.delete_profile = registry, cleanup
+    else:
+        api.profile_path = lambda sid: api.profile.parent / "different-profile"
+    result = run(case, api)
+    assert result["failed_phase"] == phase
+    assert result["failure"]["code"] in {
+        "new_profile_required", "reparse_path", "os_error", "profile_binding_mismatch"
+    }
+    if fault != "binding":
+        assert result["cleanup_complete"] is False
+        assert result["cleanup_failed_phase"] in {
+            "cleanup_profile_proof", "cleanup_profile_path",
+            "cleanup_profile_identity", "cleanup_profile_deletion",
+        }
+        assert set(result["cleanup_failure"]) >= {"code", "operation"}
+        assert api.current is not None and "delete_account" not in api.calls
+    assert secret not in json.dumps(result)
+    assert api.password.value == ""
+
+
+@pytest.mark.parametrize("code", [5, 6, None])
+def test_registry_uncertainty_blocks_profile_deletion(case, monkeypatch, code):
+    import sys
+    error = OSError("PRIVATE-query-error")
+    if code is not None:
+        error.winerror = code
+    def open_key(*args):
+        raise error
+    monkeypatch.setitem(sys.modules, "winreg", SimpleNamespace(HKEY_USERS=1, OpenKey=open_key))
+    api = object.__new__(native.Native)
+    calls = []
+    api.profile_path = lambda sid: case[0]
+    api.call = lambda *args: calls.append(args) or 1
+    with pytest.raises(native.NativeError):
+        api.delete_profile(SID, case[0])
+    assert not calls
+
+
+@pytest.mark.parametrize("status", [0, 1, 0x80070005, 0x800700B7])
+def test_create_profile_preserves_exact_hresult_and_documented_call_shape(case, monkeypatch, status):
+    api = object.__new__(native.Native)
+    def call(lib, name, result, types, *args):
+        assert (lib, name, result) == ("userenv", "CreateProfile", ctypes.c_long)
+        assert types == [native.W.LPCWSTR, native.W.LPCWSTR, native.W.LPWSTR, native.W.DWORD]
+        assert args[:2] == (SID, "dmqfixture") and args[3] == 32768
+        args[2].value = str(case[0])
+        return ctypes.c_int32(status).value
+    api.call = call
+    monkeypatch.setattr(ctypes, "get_last_error", lambda: pytest.fail("HRESULT is the return value"))
+    if status == 0:
+        assert api.create_profile("dmqfixture", SID) == case[0]
+    else:
+        with pytest.raises(native.NativeError) as caught:
+            api.create_profile("dmqfixture", SID)
+        assert api.diagnostic(caught.value, "profile_create") == {
+            "code": "new_profile_required", "operation": "CreateProfile", "hresult": status
+        }
+
+
+def test_profile_hresult_and_missing_cleanup_proof_are_both_retained(case):
+    api = FakeNative(case[0])
+    def create(name, sid):
+        raise native.NativeError("new_profile_required", operation="CreateProfile",
+                                 hresult=0x80070005)
+    api.create_profile = create
+    result = run(case, api)
+    assert result["failure"] == {
+        "code": "new_profile_required", "operation": "CreateProfile", "hresult": 0x80070005
+    }
+    assert result["cleanup_failure"] == {
+        "code": "profile_cleanup_unproven", "operation": "cleanup_profile_proof"
+    }
+    assert result["status"] == "FAILED_CLEANUP_UNPROVEN"
+    assert api.current is not None and "delete_profile" not in api.calls
+    assert "delete_account" not in api.calls
+
+
+@pytest.mark.parametrize("winerror,errno,expected", [(2, 2, False), (3, 2, None), (None, 2, None)])
+def test_only_explicit_registry_key_not_found_means_unloaded(monkeypatch, winerror, errno, expected):
+    import sys
+    error = OSError(errno, "PRIVATE-registry-args")
+    if winerror is not None:
+        error.winerror = winerror
+    def open_key(*args):
+        raise error
+    monkeypatch.setitem(sys.modules, "winreg", SimpleNamespace(HKEY_USERS=1, OpenKey=open_key))
+    api = object.__new__(native.Native)
+    if expected is False:
+        assert api.loaded_profile(SID) is False
+    else:
+        with pytest.raises(native.NativeError) as caught:
+            api.loaded_profile(SID)
+        detail = api.diagnostic(caught.value, "cleanup_profile_deletion")
+        assert detail["code"] == "profile_hive_query_failed"
+        assert detail["operation"] == "RegOpenKeyExW" and detail["errno"] == errno
+
+
+@pytest.mark.parametrize("close_error", [False, True])
+def test_open_hive_is_loaded_and_close_failure_never_proves_unloaded(monkeypatch, close_error):
+    import sys
+    class Key:
+        def __enter__(self):
+            return self
+        def __exit__(self, *args):
+            if close_error:
+                error = OSError("PRIVATE-close")
+                error.winerror = 2
+                raise error
+    monkeypatch.setitem(sys.modules, "winreg",
+                        SimpleNamespace(HKEY_USERS=1, OpenKey=lambda *args: Key()))
+    api = object.__new__(native.Native)
+    if close_error:
+        with pytest.raises(OSError):
+            api.loaded_profile(SID)
+    else:
+        assert api.loaded_profile(SID) is True
+
+
+def test_delete_profile_captures_last_error_immediately_without_other_calls(case, monkeypatch):
+    api = object.__new__(native.Native)
+    api.loaded_profile = lambda sid: False
+    api.profile_path = lambda sid: case[0]
+    events = []
+    def call(lib, name, result, types, *args):
+        events.append(name)
+        assert (lib, name, result) == ("userenv", "DeleteProfileW", native.W.BOOL)
+        assert args == (SID, str(case[0]), None)
+        return 0
+    def last_error():
+        events.append("last_error")
+        return 5
+    api.call = call
+    monkeypatch.setattr(ctypes, "get_last_error", last_error)
+    with pytest.raises(native.NativeError) as caught:
+        api.delete_profile(SID, case[0])
+    assert events == ["DeleteProfileW", "last_error"]
+    assert api.diagnostic(caught.value, "cleanup_profile_deletion") == {
+        "code": "profile_delete_failed", "operation": "DeleteProfileW", "winerror": 5
+    }
+
+
+@pytest.mark.parametrize("value", [-1, 2**32, True, "PRIVATE-numeric"])
+def test_diagnostics_reject_unbounded_or_noninteger_native_status(value):
+    error = native.NativeError("PRIVATE-code", operation="PRIVATE-operation",
+                               hresult=value, winerror=value, errno=value)
+    assert native.Native.diagnostic(error, "profile_create") == {
+        "code": "unclassified_failure", "operation": "profile_create"
+    }
+
+
+def test_diagnostics_do_not_format_hostile_exceptions_or_project_arbitrary_attributes():
+    class Hostile(RuntimeError):
+        def __str__(self):
+            raise AssertionError("Exception text must never be formatted")
+        def __repr__(self):
+            raise AssertionError("Exception args must never be formatted")
+    error = Hostile("PRIVATE-args", {"path": "PRIVATE-profile", "password": "PRIVATE-password"})
+    error.code, error.operation, error.hresult = "PRIVATE-code", "PRIVATE-operation", 5
+    assert native.Native.diagnostic(error, "profile_identity") == {
+        "code": "unclassified_failure", "operation": "profile_identity"
+    }
+    error = OSError(13, "PRIVATE-message", "PRIVATE-filename")
+    error.winerror, error.hresult = 5, 99  # Only genuine OSError fields are projected.
+    assert native.Native.diagnostic(error, "profile_identity") == {
+        "code": "os_error", "operation": "profile_identity", "errno": 13, "winerror": 5
+    }
+
+
+@pytest.mark.parametrize("child", [False, True])
+def test_main_and_child_failure_output_excludes_new_native_error_fields(case, monkeypatch, capsys, child):
+    def fail(*args, **kwargs):
+        raise native.NativeError("PRIVATE-code", operation="PRIVATE-op", hresult=5)
+    args = ["helper", "--run-hosted", "--fixture-root", str(case[0])]
+    if child:
+        args.append("--child")
+    monkeypatch.setattr(q.sys, "argv", args)
+    monkeypatch.setattr(q, "runner_guard", lambda *args, **kwargs: None)
+    monkeypatch.setattr(q, "load_exact", lambda *args: SimpleNamespace(
+        Native=(lambda: FakeNative(case[0])) if child else fail))
+    monkeypatch.setattr(q, "child_smoke", fail)
+    assert q.main() == 1
+    assert json.loads(capsys.readouterr().out) == {
+        "status": "REFUSED_OR_FAILED", "cleanup_complete": False
+    }

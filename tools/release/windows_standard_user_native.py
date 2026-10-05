@@ -15,7 +15,36 @@ from pathlib import Path
 
 
 class NativeError(RuntimeError):
-    """Fixed codes only; never format native arguments or credentials."""
+    """Fixed codes and captured numeric status; never format native arguments."""
+
+    def __init__(self, code: str, *, operation: str | None = None,
+                 hresult: int | None = None, winerror: int | None = None,
+                 errno: int | None = None) -> None:
+        super().__init__(code)
+        self.code, self.operation = code, operation
+        self.hresult, self.winerror, self.errno = hresult, winerror, errno
+
+
+DIAGNOSTIC_CODES = frozenset({
+    "new_profile_required", "profile_registration_invalid", "profile_hive_query_failed",
+    "profile_cleanup_unproven", "profile_delete_failed", "profile_delete_not_observed",
+    "profile_registration_remains", "profile_binding_mismatch", "profile_identity_changed",
+    "local_path_required", "noncanonical_path", "missing_ancestor", "reparse_path",
+    "account_cleanup_identity_changed", "account_cleanup_not_observed",
+    "failed_creation_account_state_uncertain", "account_query_failed", "account_delete_failed",
+    "fixture_cleanup_incomplete", "fixture_changed_during_cleanup", "fixture_identity_changed",
+    "owned_processes_not_exited", "suspended_child_not_exited", "native_api_failed",
+})
+DIAGNOSTIC_OPERATIONS = frozenset({
+    "CreateProfile", "DeleteProfileW", "RegOpenKeyExW", "account_creation", "interactive_logon",
+    "profile_create", "profile_path_validation", "profile_identity", "profile_registry_binding",
+    "fixture_staging", "profile_logon_process_creation", "child_execution",
+    "cleanup_process_exit", "cleanup_process_handles", "cleanup_job_handle",
+    "cleanup_logon_token", "cleanup_creation_state", "cleanup_account_identity",
+    "cleanup_profile_proof", "cleanup_profile_path", "cleanup_profile_identity",
+    "cleanup_profile_deletion", "cleanup_account_deletion", "cleanup_account_absence",
+    "cleanup_fixture", "cleanup_fixture_absence",
+})
 
 
 class SidAndAttributes(C.Structure):
@@ -67,6 +96,32 @@ class ExtendedLimit(C.Structure):
 
 class Native:
     """Explicit native calls; callers own identity and lifecycle decisions."""
+
+    @staticmethod
+    def diagnostic(error: BaseException, operation: str) -> dict:
+        """Project only allowlisted labels and bounded integers, never exception text/args."""
+        detail = {"code": "os_error" if isinstance(error, OSError) else "unclassified_failure",
+                  "operation": operation if operation in DIAGNOSTIC_OPERATIONS else "unknown"}
+        try:
+            data = vars(error)
+        except BaseException:  # noqa: BLE001 - exception attributes are untrusted
+            data = {}
+        if type(data) is dict:
+            for key, allowed in (("code", DIAGNOSTIC_CODES),
+                                 ("operation", DIAGNOSTIC_OPERATIONS)):
+                value = data.get(key)
+                if type(value) is str and value in allowed:
+                    detail[key] = value
+        fields = ("hresult", "winerror", "errno") if isinstance(error, NativeError) else (
+            ("winerror", "errno") if isinstance(error, OSError) else ())
+        for key in fields:
+            try:
+                value = getattr(error, key, None)
+            except BaseException:  # noqa: BLE001 - never log hostile attribute access
+                value = None
+            if type(value) is int and 0 <= value <= 0xFFFFFFFF:
+                detail[key] = value
+        return detail
 
     def __init__(self) -> None:
         if os.name != "nt":
@@ -177,8 +232,11 @@ class Native:
         code = self.call("userenv", "CreateProfile", C.c_long,
                          [W.LPCWSTR, W.LPCWSTR, W.LPWSTR, W.DWORD],
                          sid, name, buf, len(buf))
-        if code != 0:  # S_FALSE means preexisting: never adopt it.
-            raise NativeError("new_profile_required")
+        # Only S_OK proves creation. Existing profiles return
+        # HRESULT_FROM_WIN32(ERROR_ALREADY_EXISTS); never adopt them.
+        if code != 0:
+            raise NativeError("new_profile_required", operation="CreateProfile",
+                              hresult=code & 0xFFFFFFFF)
         return Path(buf.value)
 
     def profile_path(self, sid: str) -> Path:
@@ -193,10 +251,15 @@ class Native:
     def loaded_profile(self, sid: str) -> bool:
         import winreg
         try:
-            with winreg.OpenKey(winreg.HKEY_USERS, sid):
-                return True
-        except OSError:
-            return False
+            handle = winreg.OpenKey(winreg.HKEY_USERS, sid)
+        except OSError as error:
+            code = getattr(error, "winerror", None)
+            if type(code) is int and code == 2:  # ERROR_FILE_NOT_FOUND only.
+                return False
+            raise NativeError("profile_hive_query_failed", operation="RegOpenKeyExW",
+                              winerror=code, errno=error.errno) from None
+        with handle:
+            return True
 
     def protect(self, path: Path, owner: str, grants: dict[str, str]) -> None:
         descriptor = C.c_void_p()
@@ -321,8 +384,10 @@ class Native:
             time.sleep(0.05)
         if self.profile_path(sid) != profile or self.loaded_profile(sid):
             raise NativeError("profile_cleanup_unproven")
-        self.yes(self.call("userenv", "DeleteProfileW", W.BOOL,
-                          [W.LPCWSTR, W.LPCWSTR, W.LPCWSTR], sid, str(profile), None))
+        if not self.call("userenv", "DeleteProfileW", W.BOOL,
+                         [W.LPCWSTR, W.LPCWSTR, W.LPCWSTR], sid, str(profile), None):
+            code = C.get_last_error()
+            raise NativeError("profile_delete_failed", operation="DeleteProfileW", winerror=code)
         if profile.exists():
             raise NativeError("profile_delete_not_observed")
         try:

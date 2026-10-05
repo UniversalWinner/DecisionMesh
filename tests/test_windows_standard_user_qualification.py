@@ -4,6 +4,7 @@ from __future__ import annotations
 import ctypes
 import importlib.util
 import json
+import socket
 import stat
 import zipfile
 from pathlib import Path
@@ -35,6 +36,8 @@ def no_real_native_or_process(monkeypatch):
     monkeypatch.setattr(ctypes, "WinDLL", forbidden, raising=False)
     monkeypatch.setattr(q.subprocess, "Popen", forbidden)
     monkeypatch.setattr(q.subprocess, "run", forbidden)
+    monkeypatch.setattr(socket, "socket", forbidden)
+    monkeypatch.setattr(socket, "create_connection", forbidden)
 
 
 def token(sid=SID, parent=False):
@@ -50,7 +53,7 @@ def token(sid=SID, parent=False):
 def case(tmp_path):
     env = {"GITHUB_ACTIONS": "true", "RUNNER_ENVIRONMENT": "github-hosted",
            "RUNNER_OS": "Windows", "RUNNER_TEMP": str(tmp_path),
-           "SystemRoot": str(tmp_path / "windows")}
+           "SYSTEMROOT": str(tmp_path / "windows")}
     fixture = tmp_path / ("decisionmesh-standard-user-" + NONCE)
     inputs = {"schema_version": 1, "wheelhouse": []}
     for key, name in (("python", "python.exe"), ("wheel", "decision_mesh-0.1.0a1.whl"),
@@ -759,3 +762,34 @@ def test_main_and_child_failure_output_excludes_new_native_error_fields(case, mo
     assert json.loads(capsys.readouterr().out) == {
         "status": "REFUSED_OR_FAILED", "cleanup_complete": False
     }
+
+
+@pytest.mark.parametrize("missing", [False, True])
+def test_uppercase_windows_environment_launches_or_cleans_missing_root(case, missing):
+    fixture, inputs, env = case
+    assert "SystemRoot" not in env and all(key == key.upper() for key in env)
+    api = FakeNative(fixture)
+    original_launch = api.launch
+    observed = {}
+    def launch(name, password, argv, child_env, cwd):
+        observed.update(child_env)
+        return original_launch(name, password, argv, child_env, cwd)
+    api.launch = launch
+    if missing:
+        del env["SYSTEMROOT"]
+    result = run(case, api)
+    assert result["cleanup_complete"] and api.current is None
+    assert not fixture.exists() and not api.profile.exists() and api.password.value == ""
+    if missing:
+        assert result["status"] == "FAILED_OR_UNSUPPORTED"
+        assert result["failed_phase"] == "fixture_staging"
+        assert "launch" not in api.calls and not observed
+    else:
+        assert result["status"] == "PASS" and "launch" in api.calls
+        root = Path(env["SYSTEMROOT"])
+        assert observed["SystemRoot"] == observed["WINDIR"] == str(root)
+        assert observed["COMSPEC"] == str(root / "System32/cmd.exe")
+        assert observed["PATH"] == str(Path(inputs["python"]["path"]).parent) + q.os.pathsep + str(root / "System32")
+        assert observed["USERPROFILE"] == str(api.profile)
+        assert observed["PIP_NO_INDEX"] == "1"
+        assert observed["PIP_FIND_LINKS"] == str(fixture / "input/wheels")

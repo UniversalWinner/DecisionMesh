@@ -261,7 +261,7 @@ def execute(fixture: Path, inputs: dict, api: Any, env: dict[str, str],
         phase = "fixture_staging"
         staged, identity = prepare_fixture(fixture, rows, parent["sid"], account["sid"], api, profile)
         python = Path(inputs["python"]["path"])
-        child_env = target_environment(profile, fixture, Path(env["SystemRoot"]), python)
+        child_env = target_environment(profile, fixture, Path(env["SYSTEMROOT"]), python)
         argv = [str(python), "-I", "-B",
                 str(fixture / "input/tools/release/check_windows_standard_user.py"),
                 "--child", "--run-hosted", "--fixture-root", str(fixture)]
